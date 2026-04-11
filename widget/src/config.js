@@ -29,21 +29,22 @@ function readScriptAttributes() {
   }
 }
 
-function generateSessionId() {
-  const existing = sessionStorage.getItem('vw_session_id')
-  if (existing) return existing
-
-  const id = 'sess_' + Math.random().toString(36).slice(2, 11) + '_' + Date.now()
-  sessionStorage.setItem('vw_session_id', id)
-  return id
-}
-
 const attrs = readScriptAttributes()
 
+const wsUrl = attrs.serverUrl || 'ws://localhost:8000/ws'
+
+// Derive the HTTP base URL from the WebSocket URL so we can call REST endpoints.
+// ws://localhost:8000/ws  →  http://localhost:8000
+// wss://api.example.com/ws → https://api.example.com
+const httpBaseUrl = wsUrl
+  .replace(/^ws:\/\//, 'http://')
+  .replace(/^wss:\/\//, 'https://')
+  .replace(/\/ws$/, '')
+
 export const config = {
-  serverUrl: attrs.serverUrl || 'ws://localhost:8080',
+  wsUrl,
+  httpBaseUrl,
   lang: attrs.lang || 'en-US',
   themeColor: attrs.themeColor || '#2563eb',
   position: attrs.position || 'bottom-right',
-  sessionId: generateSessionId(),
 }

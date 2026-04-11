@@ -32,6 +32,24 @@ Then end with a single clear question asking how you can help them get started.
 Keep the entire response under 60 words. Speak naturally — it will be read aloud via text-to-speech. No markdown, no lists.
 """
 
+UPDATE_CONTEXT_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
+The host page DOM has just changed — new fields may have appeared, old ones may have gone, or the page may have navigated to a new step (e.g. a confirmation screen, a date picker, a passenger details form).
+
+You are given:
+1. The conversation history so far.
+2. The updated page snapshot (fields, buttons, URL, title).
+
+Your job is to decide whether this DOM change requires a proactive response:
+- If a new form step or screen appeared that the user needs to know about, describe it briefly and ask how to proceed.
+- If new input fields appeared that are relevant to the user's last request, fill them if you have the information, or ask for what's missing.
+- If nothing meaningful changed (minor re-renders, same fields), return an empty speech string and an empty actions list so the widget stays silent.
+
+Rules:
+- Keep speech under 30 words. It will be read aloud. No markdown, no lists.
+- Never invent selectors not present in the page context.
+- If unsure whether the change is meaningful, stay silent (empty speech, empty actions).
+"""
+
 SYSTEM_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
 Your job is to help users with disabilities interact with web pages using only their voice.
 
@@ -90,6 +108,18 @@ class BaseLLMClient(ABC):
         """Describe the page to the user on widget init. Returns plain speech text."""
         ...
 
+    @abstractmethod
+    async def get_context_update_response(
+        self,
+        page_context: PageContext,
+        history: list[dict],
+    ) -> AgentResponse:
+        """
+        React to a DOM change on the host page.
+        Returns an AgentResponse — speech may be empty if no action is needed.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Claude implementation  (Anthropic SDK, tool-use)
@@ -145,6 +175,35 @@ class ClaudeClient(BaseLLMClient):
             }],
         )
         return response.content[0].text
+
+    async def get_context_update_response(
+        self,
+        page_context: PageContext,
+        history: list[dict],
+    ) -> AgentResponse:
+        user_message = {
+            "role": "user",
+            "content": (
+                "The page DOM has changed. Here is the updated page snapshot:\n\n"
+                f"--- Updated page context ---\n{_build_page_context_str(page_context)}\n\n"
+                "Decide whether to speak or act based on this change."
+            ),
+        }
+
+        response = await self._client.messages.create(
+            model=settings.claude_model,
+            max_tokens=512,
+            system=UPDATE_CONTEXT_PROMPT,
+            tools=[self._tool],
+            tool_choice={"type": "tool", "name": "execute_actions"},
+            messages=history + [user_message],
+        )
+
+        for block in response.content:
+            if block.type == "tool_use":
+                return AgentResponse.model_validate(block.input)
+
+        raise RuntimeError("Claude returned no tool_use block for update_context.")
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +267,43 @@ class OpenAIClient(BaseLLMClient):
             max_tokens=256,
         )
         return response.choices[0].message.content or ""
+
+    async def get_context_update_response(
+        self,
+        page_context: PageContext,
+        history: list[dict],
+    ) -> AgentResponse:
+        _update_system = (
+            UPDATE_CONTEXT_PROMPT
+            + "\n\nIMPORTANT: You must respond ONLY with a valid JSON object that strictly follows "
+            "this JSON schema (no extra keys, no prose, no markdown):\n"
+            + json.dumps(_OPENAI_SCHEMA_HINT, indent=2)
+        )
+
+        user_message = {
+            "role": "user",
+            "content": (
+                "The page DOM has changed. Here is the updated page snapshot:\n\n"
+                f"--- Updated page context ---\n{_build_page_context_str(page_context)}\n\n"
+                "Decide whether to speak or act based on this change."
+            ),
+        }
+
+        messages = (
+            [{"role": "system", "content": _update_system}]
+            + history
+            + [user_message]
+        )
+
+        response = await self._client.chat.completions.create(
+            model=settings.openai_model,
+            response_format={"type": "json_object"},
+            messages=messages,
+            max_tokens=512,
+        )
+
+        raw = response.choices[0].message.content or "{}"
+        return AgentResponse.model_validate_json(raw)
 
 
 # ---------------------------------------------------------------------------

@@ -139,6 +139,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # --- Parse incoming message ---
             try:
                 msg = IncomingMessage.model_validate_json(raw)
+                print(msg)
             except Exception as parse_err:
                 await _send_error(websocket, "unknown", f"Invalid message format: {parse_err}")
                 continue
@@ -158,6 +159,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 try:
                     speech = await _llm_client.get_page_description(msg.page_context)
+                    print(speech)
                 except Exception as llm_err:
                     logger.exception("LLM error during page_init for session %s", session_id)
                     await _send_error(websocket, session_id, f"LLM error: {llm_err}")
@@ -184,8 +186,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             if msg.type == MessageType.UPDATE_CONTEXT:
-                # Widget notifies us the page changed; we just ack — no LLM call.
-                logger.info("Context updated for session %s", session_id)
+                # Store the latest page snapshot so the next process_speech call
+                # has up-to-date context. No LLM call here — that would create a
+                # feedback loop: widget fills field → DOM mutates → update_context
+                # → LLM returns fill actions → widget fills again → repeat.
+                if msg.page_context:
+                    _sessions[session_id + ":context"] = msg.page_context
+                    logger.info("Page context updated for session %s (%d fields, %d buttons)",
+                                session_id, len(msg.page_context.fields), len(msg.page_context.buttons))
                 continue
 
             if msg.type == MessageType.PROCESS_SPEECH:
@@ -212,7 +220,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Append turn to history (plain text — keeps history compact)
                 history.append({"role": "user", "content": msg.text})
                 history.append({"role": "assistant", "content": agent_resp.speech})
-
+                print (agent_resp)
                 await websocket.send_text(
                     OutgoingMessage(
                         type=MessageType.AGENT_RESPONSE,

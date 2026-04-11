@@ -3,20 +3,27 @@ import { useState, useEffect, useRef, useCallback } from 'preact/hooks'
 import { FloatingButton } from './components/FloatingButton.jsx'
 import { ChatPanel } from './components/ChatPanel.jsx'
 import { StatusIndicator } from './components/StatusIndicator.jsx'
-import { WidgetWebSocket } from './services/websocket.js'
+import { WidgetWebSocket, observeDomChanges } from './services/websocket.js'
 import { SpeechToText } from './services/stt.js'
 import { TextToSpeech } from './services/tts.js'
 import { executeDomActions } from './services/domActions.js'
 
 /**
  * Root widget component.
- * Orchestrates STT → WS → TTS pipeline and manages all UI state.
  *
- * Status flow:
- *   idle → listening (user presses mic)
- *   listening → processing (STT result received, sending to WS)
- *   processing → speaking (agent reply received, TTS starts)
- *   speaking → idle (TTS finishes)
+ * Exact connection order:
+ *   1. User clicks mic (first time)
+ *      → POST /api/session           → store session_id
+ *      → WS connect                  → no message sent on open
+ *      → send page_init              → server sends greeting agent_response
+ *      → speak greeting via TTS
+ *      → start STT (user can now speak)
+ *   2. STT result
+ *      → send process_speech (latest page_context)
+ *      → server sends agent_response: speak speech, execute actions
+ *   3. Ping every 20s (handled inside WidgetWebSocket)
+ *   4. Widget closed
+ *      → stop STT/TTS, DELETE /api/session, close WS
  */
 export function Widget({ config }) {
   const [isOpen, setIsOpen] = useState(false)
@@ -27,24 +34,25 @@ export function Widget({ config }) {
   const wsRef = useRef(null)
   const sttRef = useRef(null)
   const ttsRef = useRef(null)
+  const sessionIdRef = useRef(null)   // set once, lives for the tab session
+  const domObserverRef = useRef(null) // teardown fn returned by observeDomChanges
 
   const addMessage = useCallback((role, text) => {
     setMessages((prev) => [...prev, { role, text, timestamp: Date.now() }])
   }, [])
 
-  // Initialize services on mount
+  // ── Initialize STT + TTS on mount (no session needed yet) ────────────────
+
   useEffect(() => {
-    // TTS
     ttsRef.current = new TextToSpeech({
       onStart: () => setStatus('speaking'),
-      onEnd: () => setStatus('idle'),
+      onEnd:   () => setStatus('idle'),
       onError: (err) => {
         console.error('[widget] TTS error:', err)
         setStatus('idle')
       },
     })
 
-    // STT
     sttRef.current = new SpeechToText({
       lang: config.lang,
       onStateChange: (s) => {
@@ -52,109 +60,196 @@ export function Widget({ config }) {
       },
       onResult: (transcript) => {
         console.log('[widget] STT result:', transcript)
-        setStatus('processing')
         addMessage('user', transcript)
-        clearError()
-
-        if (wsRef.current) {
-          wsRef.current.sendMessage(transcript)
-        }
+        setStatus('processing')
+        setErrorMessage(null)
+        wsRef.current?.sendSpeech(transcript, sessionIdRef.current)
       },
       onError: (msg) => {
         console.error('[widget] STT error:', msg)
         setStatus('error')
         setErrorMessage(msg)
-        setTimeout(() => {
-          setStatus('idle')
-          setErrorMessage(null)
-        }, 3000)
+        setTimeout(() => { setStatus('idle'); setErrorMessage(null) }, 3500)
       },
     })
 
-    // WebSocket
-    const ws = new WidgetWebSocket(config.serverUrl, config.sessionId)
+    return () => {
+      sttRef.current?.stop()
+      ttsRef.current?.stop()
+    }
+  }, [config])
+
+  // ── REST helpers ─────────────────────────────────────────────────────────
+
+  async function createSession() {
+    const res = await fetch(`${config.httpBaseUrl}/api/session`, { method: 'POST' })
+    if (!res.ok) throw new Error(`POST /api/session failed: ${res.status}`)
+    const data = await res.json()
+    return data.session_id
+  }
+
+  async function deleteSession(sessionId) {
+    try {
+      await fetch(`${config.httpBaseUrl}/api/session/${sessionId}`, { method: 'DELETE' })
+      console.log('[widget] Session deleted:', sessionId)
+    } catch (err) {
+      console.warn('[widget] Could not delete session:', err)
+    }
+  }
+
+  // ── WebSocket setup ──────────────────────────────────────────────────────
+
+  function setupWebSocket(sessionId) {
+    const ws = new WidgetWebSocket(config.wsUrl)
+    ws.setSessionId(sessionId)
     wsRef.current = ws
 
-    ws.on('agent_message', (msg) => {
-      addMessage('agent', msg.text)
-      setStatus('speaking')
-      ttsRef.current?.speak(msg.text)
-    })
-
-    ws.on('dom_action', (msg) => {
-      console.log('[widget] DOM action received:', msg.actions)
-      executeDomActions(msg.actions)
-    })
-
-    ws.on('connected', () => {
-      setStatus('idle')
-      setErrorMessage(null)
-    })
-
-    ws.on('disconnected', () => {
-      if (status !== 'listening' && status !== 'processing') {
-        setStatus('disconnected')
+    ws.on('agent_response', (msg) => {
+      // Actions first (fill fields), then speak — so TTS describes what was done
+      if (Array.isArray(msg.actions) && msg.actions.length > 0) {
+        console.log('[widget] Executing DOM actions:', msg.actions)
+        executeDomActions(msg.actions)
+      }
+      if (msg.speech) {
+        addMessage('agent', msg.speech)
+        ttsRef.current?.speak(msg.speech)
       }
     })
 
-    ws.on('reconnecting', ({ attempt, delay }) => {
+    ws.on('disconnected', () => {
+      setStatus((prev) =>
+        prev === 'listening' || prev === 'processing' ? prev : 'disconnected'
+      )
+    })
+
+    ws.on('reconnecting', ({ attempt }) => {
       setStatus('disconnected')
       setErrorMessage(`Connection lost. Reconnecting... (${attempt}/5)`)
     })
 
     ws.on('max_reconnect_reached', () => {
       setStatus('error')
-      setErrorMessage('Unable to connect to server. Please refresh the page.')
+      setErrorMessage('Unable to reconnect to server. Please refresh the page.')
     })
 
-    ws.connect()
-
-    return () => {
-      ws.disconnect()
-      sttRef.current?.stop()
-      ttsRef.current?.stop()
-    }
-  }, [config])
-
-  function clearError() {
-    setErrorMessage(null)
+    return ws
   }
 
-  function handleFabClick() {
-    // If speaking, stop TTS and go idle
+  // ── First-click initialization ────────────────────────────────────────────
+  // Full sequence: POST session → WS connect → page_init → speak greeting → STT
+
+  async function initialize() {
+    setStatus('processing')
+
+    // Step 1: create session
+    let sessionId
+    try {
+      sessionId = await createSession()
+      sessionIdRef.current = sessionId
+      console.log('[widget] Session created:', sessionId)
+    } catch (err) {
+      console.error('[widget] Session creation failed:', err)
+      throw new Error('Could not reach the server. Is the backend running?')
+    }
+
+    // Step 2: connect WebSocket (Promise resolves on 'open')
+    const ws = setupWebSocket(sessionId)
+    try {
+      await ws.connect()
+      console.log('[widget] WebSocket open')
+    } catch (err) {
+      console.error('[widget] WebSocket connect failed:', err)
+      throw new Error('WebSocket connection failed. Is the backend running?')
+    }
+
+    // Step 3: send page_init — server responds with greeting agent_response
+    // The agent_response handler (wired above) will speak the greeting.
+    ws.sendPageInit(sessionId)
+    console.log('[widget] page_init sent')
+
+    // Step 4: start watching the host page for DOM changes.
+    // When fields/buttons appear, disappear, or get new IDs (SPA navigation,
+    // dynamic forms), send update_context so the backend stays in sync.
+    domObserverRef.current = observeDomChanges((pageContext) => {
+      ws.sendUpdateContext(pageContext, sessionId)
+    })
+  }
+
+  // ── Mic button handler ───────────────────────────────────────────────────
+
+  async function handleFabClick() {
+    // Speaking → stop TTS
     if (status === 'speaking') {
       ttsRef.current?.stop()
       setStatus('idle')
       return
     }
 
-    // If listening, stop STT
+    // Listening → stop STT
     if (status === 'listening') {
       sttRef.current?.stop()
       setStatus('idle')
       return
     }
 
-    // If idle or error, open panel and start listening
-    if (status === 'idle' || status === 'error') {
-      setIsOpen(true)
-      setErrorMessage(null)
+    if (status !== 'idle' && status !== 'error') return
 
-      if (!sttRef.current?.isSupported()) {
-        setErrorMessage('Voice input is not supported in this browser. Please use Chrome or Edge.')
+    if (!sttRef.current?.isSupported()) {
+      setIsOpen(true)
+      setErrorMessage('Voice input is not supported in this browser. Please use Chrome or Edge.')
+      return
+    }
+
+    setIsOpen(true)
+    setErrorMessage(null)
+
+    // First click only: run the full initialization sequence
+    if (!sessionIdRef.current) {
+      try {
+        await initialize()
+        // After greeting TTS ends (status goes idle → listening is triggered
+        // by the user clicking again). But we also start STT immediately so
+        // the user can speak right after the greeting.
+      } catch (err) {
+        console.error('[widget] Init error:', err)
+        sessionIdRef.current = null   // allow retry
+        domObserverRef.current?.()
+        domObserverRef.current = null
+        wsRef.current?.disconnect()
+        wsRef.current = null
+        setStatus('error')
+        setErrorMessage(err.message)
         return
       }
-
-      sttRef.current?.start()
     }
+
+    // Start listening — on subsequent clicks the greeting is already done
+    sttRef.current?.start()
   }
 
-  function handleClose() {
+  // ── Close / cleanup ──────────────────────────────────────────────────────
+
+  async function handleClose() {
     setIsOpen(false)
     sttRef.current?.stop()
     ttsRef.current?.stop()
     setStatus('idle')
+
+    // Stop DOM observer
+    domObserverRef.current?.()
+    domObserverRef.current = null
+
+    // Cleanup: delete session on backend, then close WS
+    const sid = sessionIdRef.current
+    if (sid) {
+      sessionIdRef.current = null
+      await deleteSession(sid)
+    }
+    wsRef.current?.disconnect()
+    wsRef.current = null
   }
+
+  // ── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div class={`vw-container vw-container--${config.position}`}>
@@ -164,14 +259,9 @@ export function Widget({ config }) {
         onClose={handleClose}
         errorMessage={errorMessage}
       />
-
       <div class="vw-controls">
         <StatusIndicator status={status} />
-        <FloatingButton
-          status={status}
-          isOpen={isOpen}
-          onClick={handleFabClick}
-        />
+        <FloatingButton status={status} isOpen={isOpen} onClick={handleFabClick} />
       </div>
     </div>
   )
