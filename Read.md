@@ -43,6 +43,102 @@ wildfireHackathon/
 └── Read.md               # This file
 ```
 
+## Widget setup
+
+The embeddable frontend voice widget lives in `widget/`. It captures user speech, sends it to the backend over WebSocket, and speaks the agent's response aloud. It can be embedded on any website via a single `<script>` tag.
+
+### Install dependencies
+
+```bash
+cd widget
+npm install
+```
+
+### Run dev server (hot reload)
+
+```bash
+cd widget
+npm run dev
+# → http://localhost:5174
+```
+
+The dev harness (`widget/index.html`) connects to `ws://localhost:8000/ws` by default.
+
+### Build production bundle
+
+```bash
+cd widget
+npm run build
+# → dist/widget.iife.js  (~32 KB, ~11 KB gzipped)
+```
+
+### Embed on any website
+
+```html
+<script
+  src="path/to/widget.iife.js"
+  data-server-url="ws://localhost:8000/ws"
+  data-lang="en-US"
+  data-theme-color="#2563eb"
+  data-position="bottom-right"
+></script>
+```
+
+### Test with the demo page
+
+After building, open `demo/index.html` in Chrome directly — it embeds the production bundle against a mock flight booking form.
+
+> **Note:** Speech recognition requires **Chrome or Edge**. Safari and Firefox do not support the Web Speech API.
+
+---
+
+## Mock server (development only)
+
+A lightweight Node.js WebSocket server that simulates the backend with keyword-based flight booking responses. Use this when developing the widget without the full Python backend.
+
+### Install dependencies
+
+```bash
+cd server
+npm install
+```
+
+### Start mock server
+
+```bash
+cd server
+npm start
+# → ws://localhost:8080
+```
+
+### Start with hot reload
+
+```bash
+cd server
+npm run dev
+# uses node --watch, restarts on file changes
+```
+
+Point the widget at the mock server by changing `data-server-url="ws://localhost:8080"` in the embed script or in `widget/index.html`.
+
+---
+
+## Full local stack (widget + real backend)
+
+```bash
+# Terminal 1 — Python backend
+cd backend
+source ../venv/bin/activate
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+# Terminal 2 — Widget dev server
+cd widget
+npm run dev
+# → open http://localhost:5174 in Chrome
+```
+
+---
+
 ## Backend setup
 
 ### 1. Create and activate a virtual environment
