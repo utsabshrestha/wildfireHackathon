@@ -1,0 +1,14 @@
+{
+  "name": "voice-widget-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "ws": "^8.17.0",
+    "uuid": "^9.0.0"
+  }
+}

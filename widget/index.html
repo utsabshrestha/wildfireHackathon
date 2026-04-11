@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice Widget — Dev Harness</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      margin: 0;
+      padding: 40px;
+      background: #f3f4f6;
+      color: #111827;
+    }
+    h1 { color: #1d4ed8; }
+    p { color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1>Voice Widget Dev Harness</h1>
+  <p>The widget should appear in the bottom-right corner. Open browser console for logs.</p>
+  <p>Make sure the WebSocket server is running: <code>cd ../server && npm start</code></p>
+
+  <script type="module" src="/src/main.js" data-server-url="ws://localhost:8080"></script>
+</body>
+</html>
