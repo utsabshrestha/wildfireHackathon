@@ -76,6 +76,7 @@ class PageContext(BaseModel):
 
 class MessageType(str, Enum):
     # Client -> Server
+    PAGE_INIT = "page_init"        # Widget just loaded — scan page and greet user
     PROCESS_SPEECH = "process_speech"
     UPDATE_CONTEXT = "update_context"
     PING = "ping"
