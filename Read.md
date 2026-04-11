@@ -1,4 +1,4 @@
-# ADA Accessibility Assistant
+# Accessibility Assistant (Flight Booking)
 
 A voice-driven accessibility agent that embeds into any website to help users with disabilities interact with web pages using only their voice. The agent understands natural speech, fills out forms, clicks buttons, and navigates pages — all hands-free.
 
