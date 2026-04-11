@@ -1,0 +1,1423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SkyRoute — Flight Booking</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .hero-pattern {
+      background-image: radial-gradient(circle at 20% 50%, rgba(255,255,255,0.06) 0%, transparent 50%),
+                        radial-gradient(circle at 80% 20%, rgba(255,255,255,0.08) 0%, transparent 40%);
+    }
+    .card-hover { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+    .card-hover:hover { transform: translateY(-2px); box-shadow: 0 12px 32px rgba(0,0,0,0.1); }
+    .input-field {
+      border: 1.5px solid #e2e8f0;
+      border-radius: 0.625rem;
+      padding: 0.75rem 1rem;
+      font-size: 0.875rem;
+      width: 100%;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      outline: none;
+    }
+    .input-field:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+    .btn-primary {
+      background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+      box-shadow: 0 4px 16px rgba(37,99,235,0.45), inset 0 1px 0 rgba(255,255,255,0.18);
+      transition: all 0.18s ease;
+      border: none;
+    }
+    .btn-primary:hover { box-shadow: 0 8px 24px rgba(37,99,235,0.5); transform: translateY(-2px); }
+    .btn-primary:active { transform: scale(0.97) translateY(0); box-shadow: 0 2px 8px rgba(37,99,235,0.4); }
+
+    .btn-success {
+      background: linear-gradient(135deg, #22c55e 0%, #15803d 100%);
+      box-shadow: 0 4px 16px rgba(22,163,74,0.45), inset 0 1px 0 rgba(255,255,255,0.18);
+      transition: all 0.18s ease;
+      border: none;
+    }
+    .btn-success:hover { box-shadow: 0 8px 24px rgba(22,163,74,0.5); transform: translateY(-2px); }
+    .btn-success:active { transform: scale(0.97) translateY(0); }
+
+    .btn-emerald {
+      background: linear-gradient(135deg, #34d399 0%, #059669 100%);
+      box-shadow: 0 4px 16px rgba(16,185,129,0.45), inset 0 1px 0 rgba(255,255,255,0.18);
+      transition: all 0.18s ease;
+      border: none;
+    }
+    .btn-emerald:hover { box-shadow: 0 8px 24px rgba(16,185,129,0.5); transform: translateY(-2px); }
+    .btn-emerald:active { transform: scale(0.97); }
+
+    .btn-violet {
+      background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
+      box-shadow: 0 4px 16px rgba(124,58,237,0.45), inset 0 1px 0 rgba(255,255,255,0.18);
+      transition: all 0.18s ease;
+      border: none;
+    }
+    .btn-violet:hover { box-shadow: 0 8px 24px rgba(124,58,237,0.5); transform: translateY(-2px); }
+    .btn-violet:active { transform: scale(0.97); }
+
+    .btn-ghost {
+      background: transparent;
+      border: 1.5px solid #e2e8f0;
+      color: #64748b;
+      transition: all 0.18s ease;
+    }
+    .btn-ghost:hover { background: #f8fafc; border-color: #94a3b8; color: #1e293b; transform: translateY(-1px); }
+    .btn-ghost:active { transform: scale(0.97); }
+    .route-line {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .route-line::before, .route-line::after {
+      content: '';
+      flex: 1;
+      border-top: 1.5px dashed #cbd5e1;
+    }
+    @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+    .float-plane { animation: float 3s ease-in-out infinite; }
+
+    /* ── Validation shake ── */
+    @keyframes shake {
+      0%,100% { transform: translateX(0); }
+      20%      { transform: translateX(-6px); }
+      40%      { transform: translateX(6px); }
+      60%      { transform: translateX(-4px); }
+      80%      { transform: translateX(4px); }
+    }
+    .shake { animation: shake 0.4s ease; }
+    .input-error { border-color: #ef4444 !important; box-shadow: 0 0 0 3px rgba(239,68,68,0.15) !important; }
+
+    /* ── Spinner ── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 0.7s linear infinite; display:inline-block; }
+
+    /* ── Toast ── */
+    @keyframes slideDown { from { opacity:0; transform: translate(-50%,-16px); } to { opacity:1; transform: translate(-50%,0); } }
+    @keyframes fadeOut  { from { opacity:1; } to { opacity:0; } }
+    .toast-in  { animation: slideDown 0.3s ease forwards; }
+    .toast-out { animation: fadeOut  0.3s ease forwards; }
+
+    /* ── Selected flight card ── */
+    .flight-selected { outline: 2.5px solid #3b82f6; box-shadow: 0 0 0 4px rgba(59,130,246,0.15); }
+
+    /* ── Pay button pulse while loading ── */
+    @keyframes pulse-glow {
+      0%,100% { box-shadow: 0 4px 16px rgba(22,163,74,0.45); }
+      50%      { box-shadow: 0 4px 32px rgba(22,163,74,0.8); }
+    }
+    .pay-loading { animation: pulse-glow 1s ease infinite; }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen flex flex-col">
+
+  <!-- ═══════════════════════════════════════════════════════ HEADER -->
+  <header class="bg-gradient-to-r from-blue-800 to-blue-700 text-white shadow-xl">
+    <div class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <!-- Back arrow — hidden on home, visible on other views -->
+        <button
+          id="btn-header-back"
+          data-agent-target="header-back"
+          aria-label="Go back"
+          class="hidden text-white/70 hover:text-white transition-colors p-1 rounded-lg
+                 hover:bg-white/10 mr-1"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none"
+               viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M15 19l-7-7 7-7" />
+          </svg>
+        </button>
+
+        <!-- Logo — click to go home -->
+        <button
+          id="btn-logo-home"
+          data-agent-target="logo-home"
+          aria-label="Go to home"
+          class="flex items-center gap-3 hover:opacity-80 transition-opacity"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945
+                 M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0
+                 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064
+                 M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span class="text-2xl font-bold tracking-tight">SkyRoute</span>
+        </button>
+      </div>
+      <nav class="hidden md:flex gap-6 text-sm font-medium">
+        <a href="#" class="hover:text-blue-200 transition-colors">Flights</a>
+        <a href="#" class="hover:text-blue-200 transition-colors">My Trips</a>
+        <a href="#" class="hover:text-blue-200 transition-colors">Check-In</a>
+        <a href="#" class="hover:text-blue-200 transition-colors">Help</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════════════════════════ HERO BAND -->
+  <div class="relative bg-gradient-to-br from-blue-800 via-blue-700 to-indigo-700 text-white py-20 px-6 overflow-hidden hero-pattern">
+    <!-- decorative blobs -->
+    <div class="absolute -top-24 -right-24 w-96 h-96 bg-white/5 rounded-full pointer-events-none"></div>
+    <div class="absolute bottom-0 -left-16 w-72 h-72 bg-indigo-500/20 rounded-full pointer-events-none"></div>
+    <div class="absolute top-8 right-1/3 w-3 h-3 bg-white/30 rounded-full pointer-events-none"></div>
+    <div class="absolute top-16 right-1/4 w-2 h-2 bg-white/20 rounded-full pointer-events-none"></div>
+
+    <div class="max-w-5xl mx-auto relative z-10">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="bg-white/15 text-white/90 text-xs font-semibold px-3 py-1 rounded-full tracking-wide uppercase">
+          ✦ Best fares, guaranteed
+        </span>
+      </div>
+      <h1 class="text-5xl font-extrabold mb-3 tracking-tight leading-tight">
+        Where will you<br class="hidden sm:block"> fly next?
+      </h1>
+      <p class="text-blue-100 text-lg max-w-md">Search hundreds of routes and book in seconds. No hidden fees.</p>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MAIN -->
+  <main class="max-w-5xl w-full mx-auto px-6 pb-12 flex-1 -mt-8 relative z-10">
+
+    <!-- ─────────────────────────────────────── VIEW 1 · SEARCH ── -->
+    <section id="view-search">
+      <div class="bg-white rounded-2xl shadow-xl border border-slate-100 p-8">
+        <div class="flex items-center gap-2 mb-6">
+          <div class="w-1 h-6 bg-blue-600 rounded-full"></div>
+          <h2 class="text-lg font-bold text-slate-800">Search Flights</h2>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+
+          <div class="flex flex-col gap-1.5 relative">
+            <label for="origin" class="text-xs font-semibold text-slate-500 uppercase tracking-wide">From</label>
+            <input
+              id="origin"
+              type="text"
+              placeholder="City or airport"
+              data-agent-target="flight-origin"
+              autocomplete="off"
+              class="input-field"
+            />
+            <ul
+              id="dropdown-origin"
+              data-agent-read="origin-suggestions"
+              class="hidden absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200
+                     rounded-lg shadow-xl z-40 max-h-52 overflow-y-auto"
+            ></ul>
+          </div>
+
+          <div class="flex flex-col gap-1.5 relative">
+            <label for="destination" class="text-xs font-semibold text-slate-500 uppercase tracking-wide">To</label>
+            <input
+              id="destination"
+              type="text"
+              placeholder="City or airport"
+              data-agent-target="flight-destination"
+              autocomplete="off"
+              class="input-field"
+            />
+            <ul
+              id="dropdown-destination"
+              data-agent-read="destination-suggestions"
+              class="hidden absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200
+                     rounded-lg shadow-xl z-40 max-h-52 overflow-y-auto"
+            ></ul>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <label for="departure-date" class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Departure</label>
+            <input
+              id="departure-date"
+              type="date"
+              data-agent-target="flight-departure-date"
+              class="input-field"
+            />
+          </div>
+
+          <div class="flex items-end">
+            <button
+              id="btn-search"
+              data-agent-target="search-flights"
+              class="btn-primary w-full text-white font-bold py-3 px-6 rounded-xl text-sm flex items-center justify-center gap-2"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"/>
+              </svg>
+              Search Flights
+            </button>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────── VIEW 2 · RESULTS ── -->
+    <section id="view-results" class="hidden">
+      <div class="flex items-center justify-between mt-6 mb-5">
+        <div>
+          <h2 class="text-xl font-bold text-slate-800">Available Flights</h2>
+          <p class="text-sm text-slate-500 mt-0.5">
+            3 results &mdash; <span id="results-route-label" data-agent-read="results-route-label" class="font-semibold text-blue-600"></span>
+          </p>
+        </div>
+        <button
+          id="btn-back-search"
+          data-agent-target="back-to-search"
+          class="btn-ghost font-semibold py-2 px-4 rounded-xl text-sm flex items-center gap-2"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+          </svg>
+          Modify Search
+        </button>
+      </div>
+
+      <div class="flex flex-col gap-4">
+
+        <!-- Flight card 1 -->
+        <div
+          data-agent-target="flight-result-1"
+          class="bg-white rounded-2xl shadow-md border border-slate-100 p-6 card-hover
+                 flex flex-col md:flex-row items-start md:items-center justify-between gap-6"
+        >
+          <div class="flex items-center gap-4 min-w-[160px]">
+            <div class="bg-blue-600 rounded-xl p-2.5 shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2h0A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/>
+              </svg>
+            </div>
+            <div>
+              <p class="font-bold text-slate-800 text-sm">SkyRoute Airlines</p>
+              <p class="text-xs text-slate-500 mt-0.5">SR 101 &middot; Economy</p>
+              <span class="inline-block mt-1 bg-green-50 text-green-700 text-[10px] font-bold px-2 py-0.5 rounded-full">Non-stop</span>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3 flex-1">
+            <div class="text-center">
+              <p class="font-extrabold text-xl text-slate-900" data-agent-read="flight-1-departure-time">08:00 AM</p>
+              <p class="text-xs font-semibold text-slate-400 mt-0.5">JFK</p>
+            </div>
+            <div class="route-line flex-1 flex flex-col items-center gap-1 px-2">
+              <span class="text-[11px] text-slate-400 font-medium">5h 30m</span>
+              <div class="w-full flex items-center gap-1">
+                <div class="flex-1 border-t-2 border-dashed border-slate-200"></div>
+                <svg class="h-4 w-4 text-blue-400 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/>
+                </svg>
+                <div class="flex-1 border-t-2 border-dashed border-slate-200"></div>
+              </div>
+            </div>
+            <div class="text-center">
+              <p class="font-extrabold text-xl text-slate-900" data-agent-read="flight-1-arrival-time">01:30 PM</p>
+              <p class="text-xs font-semibold text-slate-400 mt-0.5">LAX</p>
+            </div>
+          </div>
+
+          <div class="text-center shrink-0 md:border-l md:border-slate-100 md:pl-6">
+            <p class="text-3xl font-extrabold text-blue-600" data-agent-read="flight-1-price">$249</p>
+            <p class="text-xs text-slate-400 mb-3">per person</p>
+            <button
+              data-agent-target="select-flight-1"
+              class="btn-primary text-white font-bold py-2.5 px-7 rounded-xl text-sm flex items-center gap-2"
+            >
+              Select
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Flight card 2 — Best Value badge -->
+        <div
+          data-agent-target="flight-result-2"
+          class="bg-white rounded-2xl shadow-md border-2 border-emerald-400 p-6 card-hover relative
+                 flex flex-col md:flex-row items-start md:items-center justify-between gap-6"
+        >
+          <div class="absolute -top-3 left-6 bg-emerald-500 text-white text-[10px] font-extrabold px-3 py-1 rounded-full uppercase tracking-wide shadow">
+            Best Value
+          </div>
+          <div class="flex items-center gap-4 min-w-[160px]">
+            <div class="bg-emerald-500 rounded-xl p-2.5 shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/>
+              </svg>
+            </div>
+            <div>
+              <p class="font-bold text-slate-800 text-sm">CloudHop Air</p>
+              <p class="text-xs text-slate-500 mt-0.5">CH 204 &middot; Economy</p>
+              <span class="inline-block mt-1 bg-amber-50 text-amber-700 text-[10px] font-bold px-2 py-0.5 rounded-full">1 Stop</span>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3 flex-1">
+            <div class="text-center">
+              <p class="font-extrabold text-xl text-slate-900" data-agent-read="flight-2-departure-time">11:15 AM</p>
+              <p class="text-xs font-semibold text-slate-400 mt-0.5">JFK</p>
+            </div>
+            <div class="route-line flex-1 flex flex-col items-center gap-1 px-2">
+              <span class="text-[11px] text-slate-400 font-medium">7h 45m</span>
+              <div class="w-full flex items-center gap-1">
+                <div class="flex-1 border-t-2 border-dashed border-slate-200"></div>
+                <svg class="h-4 w-4 text-emerald-400 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/>
+                </svg>
+                <div class="flex-1 border-t-2 border-dashed border-slate-200"></div>
+              </div>
+            </div>
+            <div class="text-center">
+              <p class="font-extrabold text-xl text-slate-900" data-agent-read="flight-2-arrival-time">07:00 PM</p>
+              <p class="text-xs font-semibold text-slate-400 mt-0.5">LAX</p>
+            </div>
+          </div>
+
+          <div class="text-center shrink-0 md:border-l md:border-slate-100 md:pl-6">
+            <p class="text-3xl font-extrabold text-emerald-600" data-agent-read="flight-2-price">$189</p>
+            <p class="text-xs text-slate-400 mb-3">per person</p>
+            <button
+              data-agent-target="select-flight-2"
+              class="btn-emerald text-white font-bold py-2.5 px-7 rounded-xl text-sm flex items-center gap-2"
+            >
+              Select
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Flight card 3 -->
+        <div
+          data-agent-target="flight-result-3"
+          class="bg-white rounded-2xl shadow-md border border-slate-100 p-6 card-hover
+                 flex flex-col md:flex-row items-start md:items-center justify-between gap-6"
+        >
+          <div class="flex items-center gap-4 min-w-[160px]">
+            <div class="bg-violet-600 rounded-xl p-2.5 shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/>
+              </svg>
+            </div>
+            <div>
+              <p class="font-bold text-slate-800 text-sm">AeroLux</p>
+              <p class="text-xs text-slate-500 mt-0.5">AL 337 &middot; Business</p>
+              <span class="inline-block mt-1 bg-violet-50 text-violet-700 text-[10px] font-bold px-2 py-0.5 rounded-full">Non-stop</span>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3 flex-1">
+            <div class="text-center">
+              <p class="font-extrabold text-xl text-slate-900" data-agent-read="flight-3-departure-time">03:45 PM</p>
+              <p class="text-xs font-semibold text-slate-400 mt-0.5">JFK</p>
+            </div>
+            <div class="route-line flex-1 flex flex-col items-center gap-1 px-2">
+              <span class="text-[11px] text-slate-400 font-medium">5h 30m</span>
+              <div class="w-full flex items-center gap-1">
+                <div class="flex-1 border-t-2 border-dashed border-slate-200"></div>
+                <svg class="h-4 w-4 text-violet-400 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/>
+                </svg>
+                <div class="flex-1 border-t-2 border-dashed border-slate-200"></div>
+              </div>
+            </div>
+            <div class="text-center">
+              <p class="font-extrabold text-xl text-slate-900" data-agent-read="flight-3-arrival-time">09:15 PM</p>
+              <p class="text-xs font-semibold text-slate-400 mt-0.5">LAX</p>
+            </div>
+          </div>
+
+          <div class="text-center shrink-0 md:border-l md:border-slate-100 md:pl-6">
+            <p class="text-3xl font-extrabold text-violet-600" data-agent-read="flight-3-price">$489</p>
+            <p class="text-xs text-slate-400 mb-3">per person</p>
+            <button
+              data-agent-target="select-flight-3"
+              class="btn-violet text-white font-bold py-2.5 px-7 rounded-xl text-sm flex items-center gap-2"
+            >
+              Select
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────── VIEW 3 · CHECKOUT ── -->
+    <section id="view-checkout" class="hidden">
+
+      <!-- Selected flight summary banner -->
+      <div class="mt-6 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl p-5 mb-6 shadow-lg">
+        <p class="text-xs font-bold text-blue-200 uppercase tracking-widest mb-1">Your Selected Flight</p>
+        <p id="checkout-flight-info"
+           data-agent-read="checkout-flight-info"
+           class="font-semibold text-white text-sm">
+          &mdash;
+        </p>
+      </div>
+
+      <div class="bg-white rounded-2xl shadow-xl border border-slate-100 p-8">
+        <div class="flex items-center gap-2 mb-6">
+          <div class="w-1 h-6 bg-blue-600 rounded-full"></div>
+          <h2 class="text-lg font-bold text-slate-800">Payment Details</h2>
+          <!-- Card brand icons -->
+          <div class="ml-auto flex items-center gap-2">
+            <span class="bg-slate-100 text-slate-500 text-[10px] font-bold px-2 py-1 rounded">VISA</span>
+            <span class="bg-slate-100 text-slate-500 text-[10px] font-bold px-2 py-1 rounded">MC</span>
+            <span class="bg-slate-100 text-slate-500 text-[10px] font-bold px-2 py-1 rounded">AMEX</span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+
+          <div class="flex flex-col gap-1.5 md:col-span-2">
+            <label for="card-name" class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Name on Card</label>
+            <input
+              id="card-name"
+              type="text"
+              placeholder="Jane Doe"
+              data-agent-target="card-name"
+              class="input-field"
+            />
+          </div>
+
+          <div class="flex flex-col gap-1.5 md:col-span-2">
+            <label for="card-number" class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Card Number</label>
+            <input
+              id="card-number"
+              type="text"
+              placeholder="1234 5678 9012 3456"
+              maxlength="19"
+              data-agent-target="card-number"
+              class="input-field"
+            />
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <label for="card-expiry" class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Expiry Date</label>
+            <input
+              id="card-expiry"
+              type="text"
+              placeholder="MM / YY"
+              maxlength="7"
+              data-agent-target="card-expiry"
+              class="input-field"
+            />
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <label for="card-cvv" class="text-xs font-semibold text-slate-500 uppercase tracking-wide">CVV</label>
+            <input
+              id="card-cvv"
+              type="password"
+              placeholder="&bull;&bull;&bull;"
+              maxlength="4"
+              data-agent-target="card-cvv"
+              class="input-field"
+            />
+          </div>
+
+        </div>
+
+        <div class="mt-8 pt-6 border-t border-slate-100 flex flex-col md:flex-row items-center justify-between gap-4">
+          <button
+            id="btn-back-results"
+            data-agent-target="back-to-results"
+            class="btn-ghost font-semibold py-2.5 px-5 rounded-xl text-sm flex items-center gap-2"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+            </svg>
+            Back to Results
+          </button>
+          <button
+            id="btn-pay"
+            data-agent-target="pay-now"
+            class="btn-success text-white font-bold py-3.5 px-12 rounded-xl flex items-center gap-2.5 text-base"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+            </svg>
+            Pay Now
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────── VIEW 4 · SUCCESS ── -->
+    <section id="view-success" class="hidden py-8">
+      <div class="bg-white rounded-2xl shadow-xl border border-slate-100 p-12 max-w-lg mx-auto text-center">
+        <!-- animated check ring -->
+        <div class="flex items-center justify-center mb-6">
+          <div class="relative">
+            <div class="w-24 h-24 rounded-full bg-gradient-to-br from-green-400 to-emerald-500 flex items-center justify-center shadow-lg" style="box-shadow:0 0 0 8px rgba(34,197,94,0.15)">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-white"
+                   fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-2">
+          <span class="bg-green-50 text-green-700 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wide">Booking Confirmed</span>
+        </div>
+        <h2 class="text-3xl font-extrabold text-slate-800 mt-3 mb-3">You're all set! ✈️</h2>
+        <p
+          data-agent-read="success-message"
+          class="text-slate-500 text-base leading-relaxed"
+        >
+          Your flight has been booked successfully. A confirmation email will be sent to you shortly. Thank you for flying with SkyRoute!
+        </p>
+
+        <!-- booking ref -->
+        <div class="mt-6 bg-slate-50 rounded-xl p-4 border border-slate-100">
+          <p class="text-xs text-slate-400 uppercase tracking-wide font-semibold mb-1">Booking Reference</p>
+          <p class="text-2xl font-extrabold text-slate-800 tracking-widest">SKY-48291</p>
+        </div>
+
+        <button
+          id="btn-book-another"
+          data-agent-target="book-another-flight"
+          class="btn-primary mt-8 text-white font-bold py-3.5 px-10 rounded-xl flex items-center gap-2.5 mx-auto"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/>
+          </svg>
+          Book Another Flight
+        </button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ═══════════════════════════════════════════════════════ FOOTER -->
+  <footer class="bg-gradient-to-r from-slate-900 to-slate-800 text-slate-400 text-sm py-8 px-6 mt-auto">
+    <div class="max-w-5xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+      <div class="flex items-center gap-2 text-white font-semibold">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-blue-400" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/>
+        </svg>
+        SkyRoute
+        <span class="text-slate-500 font-normal">&nbsp;&mdash;&nbsp;&copy; 2025. All rights reserved.</span>
+      </div>
+      <div class="flex gap-6 text-xs">
+        <a href="#" class="hover:text-white transition-colors">Privacy Policy</a>
+        <a href="#" class="hover:text-white transition-colors">Terms of Service</a>
+        <a href="#" class="hover:text-white transition-colors">Contact Us</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ═══════════════════════════════════ ADA AGENT SIDE TAB + PANEL -->
+  <div id="agent-sidebar" class="fixed right-0 top-1/2 -translate-y-1/2 z-50 flex items-center">
+
+    <!-- Vertical tab trigger -->
+    <button
+      id="agent-tab-toggle"
+      data-agent-target="toggle-ada-agent"
+      aria-label="Toggle ADA Agent panel"
+      class="bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white
+             text-xs font-bold tracking-widest uppercase shadow-lg
+             rounded-l-xl py-5 px-2 transition-colors flex flex-col items-center gap-2"
+      style="writing-mode: vertical-rl; transform: rotate(180deg);"
+    >
+      <!-- accessibility icon -->
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+           viewBox="0 0 24 24" stroke="currentColor" style="transform:rotate(90deg)">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0
+             0112 2.944a11.955 11.955 0 01-8.618 3.04
+             A12.02 12.02 0 003 9c0 5.591 3.824 10.29
+             9 11.622 5.176-1.332 9-6.03 9-11.622
+             0-1.042-.133-2.052-.382-3.016z" />
+      </svg>
+      ADA Agent
+    </button>
+
+    <!-- Slide-in panel -->
+    <div
+      id="ada-agent-container"
+      data-agent-read="ada-agent-panel"
+      aria-label="ADA Accessibility Agent Panel"
+      class="hidden bg-white border-l border-slate-200 shadow-2xl flex flex-col"
+      style="width:320px; height:480px;"
+    >
+      <!-- Panel header -->
+      <div class="bg-blue-600 text-white px-4 py-3 flex items-center justify-between shrink-0">
+        <div class="flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none"
+               viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0
+                 0112 2.944a11.955 11.955 0 01-8.618 3.04
+                 A12.02 12.02 0 003 9c0 5.591 3.824 10.29
+                 9 11.622 5.176-1.332 9-6.03 9-11.622
+                 0-1.042-.133-2.052-.382-3.016z" />
+          </svg>
+          <span class="font-semibold text-sm">ADA Accessibility Agent</span>
+        </div>
+        <button
+          id="agent-panel-close"
+          data-agent-target="close-ada-panel"
+          aria-label="Close agent panel"
+          class="text-blue-200 hover:text-white transition-colors text-lg leading-none"
+        >
+          &times;
+        </button>
+      </div>
+
+      <!-- Placeholder content — agent injects here -->
+      <div class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+        <div class="bg-blue-50 rounded-full p-4">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-blue-400" fill="none"
+               viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0
+                 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2
+                 2v12a2 2 0 002 2z" />
+          </svg>
+        </div>
+        <p class="text-slate-500 text-sm leading-relaxed">
+          Agent widget will be injected here by the ADA Compliance Agent.
+        </p>
+        <div class="w-full border-t border-dashed border-slate-200 pt-3">
+          <p class="text-xs text-slate-400 font-mono">id="ada-agent-container"</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ JS ── -->
+  <script>
+    // ── Flight metadata ────────────────────────────────────────────
+    const FLIGHTS = {
+      1: { airline: 'SkyRoute Airlines', flight: 'SR 101', dep: '08:00 AM', arr: '01:30 PM', price: '$249', cabin: 'Economy', stops: 'Non-stop' },
+      2: { airline: 'CloudHop Air',      flight: 'CH 204', dep: '11:15 AM', arr: '07:00 PM', price: '$189', cabin: 'Economy', stops: '1 Stop'   },
+      3: { airline: 'AeroLux',           flight: 'AL 337', dep: '03:45 PM', arr: '09:15 PM', price: '$489', cabin: 'Business', stops: 'Non-stop' },
+    };
+
+    const ALL_VIEWS = ['view-search', 'view-results', 'view-checkout', 'view-success'];
+    let viewHistory = [];
+
+    // ── View switcher ──────────────────────────────────────────────
+    function showView(id, pushHistory = true) {
+      const current = ALL_VIEWS.find(v => !document.getElementById(v).classList.contains('hidden'));
+      if (pushHistory && current && current !== id) viewHistory.push(current);
+      ALL_VIEWS.forEach(v => document.getElementById(v).classList.toggle('hidden', v !== id));
+      document.getElementById('btn-header-back').classList.toggle('hidden', id === 'view-search');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    // ── Toast notifications ────────────────────────────────────────
+    function showToast(msg, type = 'error') {
+      const old = document.getElementById('sk-toast');
+      if (old) old.remove();
+      const colors = type === 'success'
+        ? 'background:linear-gradient(135deg,#22c55e,#15803d);'
+        : type === 'info'
+        ? 'background:linear-gradient(135deg,#3b82f6,#1d4ed8);'
+        : 'background:linear-gradient(135deg,#ef4444,#b91c1c);';
+      const icon = type === 'success'
+        ? '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>'
+        : type === 'info'
+        ? '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01"/>'
+        : '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>';
+      const t = document.createElement('div');
+      t.id = 'sk-toast';
+      t.className = 'toast-in';
+      t.style.cssText = `position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:9999;
+        padding:12px 20px;border-radius:14px;color:#fff;font-size:14px;font-weight:600;
+        display:flex;align-items:center;gap:10px;box-shadow:0 8px 32px rgba(0,0,0,0.18);
+        white-space:nowrap;${colors}`;
+      t.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" style="width:18px;height:18px;flex-shrink:0"
+        fill="none" viewBox="0 0 24 24" stroke="currentColor">${icon}</svg>${msg}`;
+      document.body.appendChild(t);
+      setTimeout(() => { t.className = 'toast-out'; setTimeout(() => t.remove(), 300); }, 3200);
+    }
+
+    // ── Field validation ───────────────────────────────────────────
+    function validateField(id) {
+      const el = document.getElementById(id);
+      if (!el || !el.value.trim()) {
+        if (el) {
+          el.classList.add('input-error', 'shake');
+          setTimeout(() => el.classList.remove('shake'), 450);
+        }
+        return false;
+      }
+      el.classList.remove('input-error');
+      return true;
+    }
+
+    // ── Button loading state ───────────────────────────────────────
+    function setBtnLoading(btn, loading, loadingLabel = 'Loading...') {
+      if (loading) {
+        btn.dataset.orig = btn.innerHTML;
+        btn.innerHTML = `<svg class="spin" style="width:18px;height:18px;border:2.5px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%"></svg>${loadingLabel}`;
+        btn.disabled = true;
+        btn.style.opacity = '0.85';
+      } else {
+        btn.innerHTML = btn.dataset.orig;
+        btn.disabled = false;
+        btn.style.opacity = '';
+      }
+    }
+
+    // ── Extract airport code from "City, ST (XYZ)" ─────────────────
+    function extractCode(val) {
+      const m = val.match(/\(([A-Z]{3})\)/);
+      return m ? m[1] : (val.trim().toUpperCase().slice(0, 3) || '???');
+    }
+
+    // ── Dynamically update flight card airport labels ───────────────
+    function updateFlightCards(originVal, destVal) {
+      const orig = extractCode(originVal);
+      const dest = extractCode(destVal);
+      // Update all JFK/LAX labels in the route sections
+      document.querySelectorAll('[data-agent-read$="-departure-time"]').forEach(el => {
+        const codeEl = el.parentElement.querySelector('p:last-child');
+        if (codeEl) codeEl.textContent = orig;
+      });
+      document.querySelectorAll('[data-agent-read$="-arrival-time"]').forEach(el => {
+        const codeEl = el.parentElement.querySelector('p:last-child');
+        if (codeEl) codeEl.textContent = dest;
+      });
+      // Route label in heading
+      const label = document.getElementById('results-route-label');
+      if (label) label.textContent = `${extractCode(originVal)} → ${extractCode(destVal)}`;
+    }
+
+    // ── Clear error styling on input ───────────────────────────────
+    ['origin','destination','departure-date','card-name','card-number','card-expiry','card-cvv']
+      .forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', () => el.classList.remove('input-error'));
+      });
+
+    // ── Card number formatter: "1234 5678 9012 3456" ───────────────
+    document.getElementById('card-number').addEventListener('input', e => {
+      const raw = e.target.value.replace(/\D/g, '').slice(0, 16);
+      e.target.value = raw.match(/.{1,4}/g)?.join(' ') ?? raw;
+    });
+
+    // ── Expiry formatter: "MM / YY" ────────────────────────────────
+    document.getElementById('card-expiry').addEventListener('input', e => {
+      let raw = e.target.value.replace(/\D/g, '').slice(0, 4);
+      if (raw.length >= 3) raw = raw.slice(0, 2) + ' / ' + raw.slice(2);
+      e.target.value = raw;
+    });
+
+    // ── CVV: digits only ───────────────────────────────────────────
+    document.getElementById('card-cvv').addEventListener('input', e => {
+      e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4);
+    });
+
+    // ══════════════════════════════════════════════════════════════
+    //  BUTTON HANDLERS
+    // ══════════════════════════════════════════════════════════════
+
+    // ── Logo → home ────────────────────────────────────────────────
+    document.getElementById('btn-logo-home').addEventListener('click', () => {
+      viewHistory = [];
+      showView('view-search', false);
+    });
+
+    // ── Header back arrow ──────────────────────────────────────────
+    document.getElementById('btn-header-back').addEventListener('click', () => {
+      const prev = viewHistory.pop();
+      if (prev) showView(prev, false);
+    });
+
+    // ── Search Flights ─────────────────────────────────────────────
+    document.getElementById('btn-search').addEventListener('click', () => {
+      const okO = validateField('origin');
+      const okD = validateField('destination');
+      const okDt = validateField('departure-date');
+      if (!okO || !okD || !okDt) {
+        showToast('Please fill in origin, destination, and date.');
+        return;
+      }
+      const btn = document.getElementById('btn-search');
+      setBtnLoading(btn, true, ' Searching…');
+      setTimeout(() => {
+        setBtnLoading(btn, false);
+        updateFlightCards(
+          document.getElementById('origin').value,
+          document.getElementById('destination').value
+        );
+        showView('view-results');
+        showToast('3 flights found for your route!', 'success');
+      }, 1200);
+    });
+
+    // ── Modify Search (results → search) ──────────────────────────
+    document.getElementById('btn-back-search').addEventListener('click', () => {
+      showView('view-search');
+    });
+
+    // ── Select a flight ────────────────────────────────────────────
+    document.querySelectorAll('[data-agent-target^="select-flight-"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const n = parseInt(btn.getAttribute('data-agent-target').split('-').pop(), 10);
+        const f = FLIGHTS[n];
+
+        // Highlight selected card, deselect others
+        document.querySelectorAll('[data-agent-target^="flight-result-"]').forEach(card => {
+          card.classList.remove('flight-selected');
+        });
+        btn.closest('[data-agent-target^="flight-result-"]').classList.add('flight-selected');
+
+        // Populate checkout summary
+        document.getElementById('checkout-flight-info').textContent =
+          `${f.airline} ${f.flight}  ·  ${f.dep} → ${f.arr}  ·  ${f.price}  ·  ${f.cabin} / ${f.stops}`;
+
+        showToast(`${f.airline} ${f.flight} selected — ${f.price}`, 'info');
+        setTimeout(() => showView('view-checkout'), 500);
+      });
+    });
+
+    // ── Back to Results ────────────────────────────────────────────
+    document.getElementById('btn-back-results').addEventListener('click', () => {
+      showView('view-results');
+    });
+
+    // ── Pay Now ────────────────────────────────────────────────────
+    document.getElementById('btn-pay').addEventListener('click', () => {
+      const ok = ['card-name','card-number','card-expiry','card-cvv'].map(validateField);
+      if (ok.includes(false)) {
+        showToast('Please complete all payment fields.');
+        return;
+      }
+      const btn = document.getElementById('btn-pay');
+      btn.classList.add('pay-loading');
+      setBtnLoading(btn, true, ' Processing payment…');
+      setTimeout(() => {
+        btn.classList.remove('pay-loading');
+        setBtnLoading(btn, false);
+        showView('view-success');
+        showToast('Payment successful! Check your email.', 'success');
+      }, 2000);
+    });
+
+    // ── Book Another Flight (reset everything) ─────────────────────
+    document.getElementById('btn-book-another').addEventListener('click', () => {
+      ['origin','destination','departure-date','card-name','card-number','card-expiry','card-cvv']
+        .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+      document.querySelectorAll('[data-agent-target^="flight-result-"]').forEach(c => c.classList.remove('flight-selected'));
+      viewHistory = [];
+      showView('view-search', false);
+    });
+
+    // ── Airport autocomplete ───────────────────────────────────────
+    const AIRPORTS = [
+      // ── ALABAMA ────────────────────────────────────────────────────
+      { code: 'BHM', city: 'Birmingham, AL',        name: 'Birmingham–Shuttlesworth International' },
+      { code: 'DHN', city: 'Dothan, AL',             name: 'Dothan Regional Airport' },
+      { code: 'HSV', city: 'Huntsville, AL',         name: 'Huntsville International Airport' },
+      { code: 'MOB', city: 'Mobile, AL',             name: 'Mobile Regional Airport' },
+      { code: 'MGM', city: 'Montgomery, AL',         name: 'Montgomery Regional Airport' },
+      // ── ALASKA ─────────────────────────────────────────────────────
+      { code: 'ANC', city: 'Anchorage, AK',          name: 'Ted Stevens Anchorage International' },
+      { code: 'BET', city: 'Bethel, AK',             name: 'Bethel Airport' },
+      { code: 'CDV', city: 'Cordova, AK',            name: 'Merle K. Smith Airport' },
+      { code: 'SCC', city: 'Deadhorse, AK',          name: 'Deadhorse Airport (Prudhoe Bay)' },
+      { code: 'DLG', city: 'Dillingham, AK',         name: 'Dillingham Airport' },
+      { code: 'FAI', city: 'Fairbanks, AK',          name: 'Fairbanks International Airport' },
+      { code: 'JNU', city: 'Juneau, AK',             name: 'Juneau International Airport' },
+      { code: 'KTN', city: 'Ketchikan, AK',          name: 'Ketchikan International Airport' },
+      { code: 'AKN', city: 'King Salmon, AK',        name: 'King Salmon Airport' },
+      { code: 'ADQ', city: 'Kodiak, AK',             name: 'Kodiak Airport' },
+      { code: 'OTZ', city: 'Kotzebue, AK',           name: 'Ralph Wien Memorial Airport' },
+      { code: 'OME', city: 'Nome, AK',               name: 'Nome Airport' },
+      { code: 'PSG', city: 'Petersburg, AK',         name: 'Petersburg James A. Johnson Airport' },
+      { code: 'SIT', city: 'Sitka, AK',              name: 'Sitka Rocky Gutierrez Airport' },
+      { code: 'BRW', city: 'Barrow, AK',             name: 'Wiley Post–Will Rogers Memorial Airport' },
+      { code: 'WRG', city: 'Wrangell, AK',           name: 'Wrangell Airport' },
+      { code: 'YAK', city: 'Yakutat, AK',            name: 'Yakutat Airport' },
+      // ── ARIZONA ────────────────────────────────────────────────────
+      { code: 'FLG', city: 'Flagstaff, AZ',          name: 'Flagstaff Pulliam Airport' },
+      { code: 'AZA', city: 'Mesa, AZ',               name: 'Mesa Gateway Airport' },
+      { code: 'PGA', city: 'Page, AZ',               name: 'Page Municipal Airport' },
+      { code: 'PHX', city: 'Phoenix, AZ',            name: 'Phoenix Sky Harbor International' },
+      { code: 'PRC', city: 'Prescott, AZ',           name: 'Prescott Municipal Airport' },
+      { code: 'TUS', city: 'Tucson, AZ',             name: 'Tucson International Airport' },
+      { code: 'YUM', city: 'Yuma, AZ',               name: 'Yuma International Airport' },
+      // ── ARKANSAS ───────────────────────────────────────────────────
+      { code: 'XNA', city: 'Fayetteville, AR',       name: 'Northwest Arkansas National Airport' },
+      { code: 'FSM', city: 'Fort Smith, AR',         name: 'Fort Smith Regional Airport' },
+      { code: 'LIT', city: 'Little Rock, AR',        name: 'Bill & Hillary Clinton National Airport' },
+      { code: 'TXK', city: 'Texarkana, AR',          name: 'Texarkana Regional Airport' },
+      // ── CALIFORNIA ─────────────────────────────────────────────────
+      { code: 'ACV', city: 'Arcata/Eureka, CA',      name: 'California Redwood Coast–Humboldt County Airport' },
+      { code: 'BFL', city: 'Bakersfield, CA',        name: 'Meadows Field' },
+      { code: 'BUR', city: 'Burbank, CA',            name: 'Hollywood Burbank Airport' },
+      { code: 'FAT', city: 'Fresno, CA',             name: 'Fresno Yosemite International Airport' },
+      { code: 'LGB', city: 'Long Beach, CA',         name: 'Long Beach Airport' },
+      { code: 'LAX', city: 'Los Angeles, CA',        name: 'Los Angeles International Airport' },
+      { code: 'MRY', city: 'Monterey, CA',           name: 'Monterey Regional Airport' },
+      { code: 'OAK', city: 'Oakland, CA',            name: 'Oakland San Francisco Bay Airport' },
+      { code: 'ONT', city: 'Ontario, CA',            name: 'Ontario International Airport' },
+      { code: 'PSP', city: 'Palm Springs, CA',       name: 'Palm Springs International Airport' },
+      { code: 'RDD', city: 'Redding, CA',            name: 'Redding Regional Airport' },
+      { code: 'SMF', city: 'Sacramento, CA',         name: 'Sacramento International Airport' },
+      { code: 'SAN', city: 'San Diego, CA',          name: 'San Diego International Airport' },
+      { code: 'SFO', city: 'San Francisco, CA',      name: 'San Francisco International Airport' },
+      { code: 'SJC', city: 'San Jose, CA',           name: 'San Jose International Airport' },
+      { code: 'SBP', city: 'San Luis Obispo, CA',    name: 'San Luis Obispo County Regional Airport' },
+      { code: 'SNA', city: 'Santa Ana, CA',          name: 'John Wayne Airport' },
+      { code: 'SBA', city: 'Santa Barbara, CA',      name: 'Santa Barbara Municipal Airport' },
+      { code: 'SMX', city: 'Santa Maria, CA',        name: 'Santa Maria Public Airport' },
+      { code: 'STS', city: 'Santa Rosa, CA',         name: 'Charles M. Schulz–Sonoma County Airport' },
+      { code: 'SCK', city: 'Stockton, CA',           name: 'Stockton Metropolitan Airport' },
+      // ── COLORADO ───────────────────────────────────────────────────
+      { code: 'ALS', city: 'Alamosa, CO',            name: 'San Luis Valley Regional Airport' },
+      { code: 'ASE', city: 'Aspen, CO',              name: 'Aspen/Pitkin County Airport' },
+      { code: 'COS', city: 'Colorado Springs, CO',   name: 'Colorado Springs Municipal Airport' },
+      { code: 'DEN', city: 'Denver, CO',             name: 'Denver International Airport' },
+      { code: 'DRO', city: 'Durango, CO',            name: 'Durango–La Plata County Airport' },
+      { code: 'EGE', city: 'Eagle/Vail, CO',         name: 'Eagle County Regional Airport' },
+      { code: 'GJT', city: 'Grand Junction, CO',     name: 'Grand Junction Regional Airport' },
+      { code: 'GUC', city: 'Gunnison, CO',           name: 'Gunnison–Crested Butte Regional Airport' },
+      { code: 'HDN', city: 'Hayden, CO',             name: 'Yampa Valley Airport' },
+      { code: 'MTJ', city: 'Montrose, CO',           name: 'Montrose Regional Airport' },
+      // ── CONNECTICUT ────────────────────────────────────────────────
+      { code: 'BDL', city: 'Hartford, CT',           name: 'Bradley International Airport' },
+      { code: 'HVN', city: 'New Haven, CT',          name: 'Tweed-New Haven Airport' },
+      // ── DELAWARE ───────────────────────────────────────────────────
+      { code: 'ILG', city: 'Wilmington, DE',         name: 'Wilmington Airport' },
+      // ── FLORIDA ────────────────────────────────────────────────────
+      { code: 'DAB', city: 'Daytona Beach, FL',      name: 'Daytona Beach International Airport' },
+      { code: 'FLL', city: 'Fort Lauderdale, FL',    name: 'Fort Lauderdale–Hollywood International' },
+      { code: 'RSW', city: 'Fort Myers, FL',         name: 'Southwest Florida International Airport' },
+      { code: 'VPS', city: 'Fort Walton Beach, FL',  name: 'Destin–Fort Walton Beach Airport' },
+      { code: 'GNV', city: 'Gainesville, FL',        name: 'Gainesville Regional Airport' },
+      { code: 'JAX', city: 'Jacksonville, FL',       name: 'Jacksonville International Airport' },
+      { code: 'EYW', city: 'Key West, FL',           name: 'Key West International Airport' },
+      { code: 'MLB', city: 'Melbourne, FL',          name: 'Melbourne Orlando International Airport' },
+      { code: 'MIA', city: 'Miami, FL',              name: 'Miami International Airport' },
+      { code: 'MCO', city: 'Orlando, FL',            name: 'Orlando International Airport' },
+      { code: 'ECP', city: 'Panama City, FL',        name: 'Northwest Florida Beaches International' },
+      { code: 'PNS', city: 'Pensacola, FL',          name: 'Pensacola International Airport' },
+      { code: 'PGD', city: 'Punta Gorda, FL',        name: 'Punta Gorda Airport' },
+      { code: 'SFB', city: 'Sanford, FL',            name: 'Orlando Sanford International Airport' },
+      { code: 'SRQ', city: 'Sarasota, FL',           name: 'Sarasota–Bradenton International Airport' },
+      { code: 'PIE', city: 'St. Petersburg, FL',     name: 'St. Pete–Clearwater International Airport' },
+      { code: 'TLH', city: 'Tallahassee, FL',        name: 'Tallahassee International Airport' },
+      { code: 'TPA', city: 'Tampa, FL',              name: 'Tampa International Airport' },
+      { code: 'VRB', city: 'Vero Beach, FL',         name: 'Vero Beach Regional Airport' },
+      { code: 'PBI', city: 'West Palm Beach, FL',    name: 'Palm Beach International Airport' },
+      // ── GEORGIA ────────────────────────────────────────────────────
+      { code: 'ABY', city: 'Albany, GA',             name: 'Southwest Georgia Regional Airport' },
+      { code: 'ATL', city: 'Atlanta, GA',            name: 'Hartsfield–Jackson Atlanta International' },
+      { code: 'AGS', city: 'Augusta, GA',            name: 'Augusta Regional Airport' },
+      { code: 'BQK', city: 'Brunswick, GA',          name: 'Brunswick Golden Isles Airport' },
+      { code: 'CSG', city: 'Columbus, GA',           name: 'Columbus Airport' },
+      { code: 'MCN', city: 'Macon, GA',              name: 'Middle Georgia Regional Airport' },
+      { code: 'SAV', city: 'Savannah, GA',           name: 'Savannah/Hilton Head International Airport' },
+      { code: 'VLD', city: 'Valdosta, GA',           name: 'Valdosta Regional Airport' },
+      // ── HAWAII ─────────────────────────────────────────────────────
+      { code: 'ITO', city: 'Hilo, HI',              name: 'Hilo International Airport' },
+      { code: 'HNL', city: 'Honolulu, HI',          name: 'Daniel K. Inouye International Airport' },
+      { code: 'OGG', city: 'Kahului (Maui), HI',    name: 'Kahului Airport' },
+      { code: 'KOA', city: 'Kailua-Kona, HI',       name: 'Ellison Onizuka Kona International Airport' },
+      { code: 'MKK', city: 'Molokai, HI',           name: 'Molokai Airport' },
+      { code: 'LNY', city: 'Lanai City, HI',        name: 'Lanai Airport' },
+      { code: 'LIH', city: 'Lihue (Kauai), HI',    name: 'Lihue Airport' },
+      // ── IDAHO ──────────────────────────────────────────────────────
+      { code: 'BOI', city: 'Boise, ID',             name: 'Boise Airport' },
+      { code: 'SUN', city: 'Hailey/Sun Valley, ID', name: 'Friedman Memorial Airport' },
+      { code: 'IDA', city: 'Idaho Falls, ID',       name: 'Idaho Falls Regional Airport' },
+      { code: 'LWS', city: 'Lewiston, ID',          name: 'Lewiston–Nez Perce County Airport' },
+      { code: 'PIH', city: 'Pocatello, ID',         name: 'Pocatello Regional Airport' },
+      { code: 'TWF', city: 'Twin Falls, ID',        name: 'Magic Valley Regional Airport' },
+      // ── ILLINOIS ───────────────────────────────────────────────────
+      { code: 'BMI', city: 'Bloomington, IL',       name: 'Central Illinois Regional Airport' },
+      { code: 'CMI', city: 'Champaign, IL',         name: 'University of Illinois Willard Airport' },
+      { code: 'MDW', city: 'Chicago, IL',           name: 'Chicago Midway International Airport' },
+      { code: 'ORD', city: 'Chicago, IL',           name: "Chicago O'Hare International Airport" },
+      { code: 'MLI', city: 'Moline, IL',            name: 'Quad Cities International Airport' },
+      { code: 'PIA', city: 'Peoria, IL',            name: 'Peoria International Airport' },
+      { code: 'RFD', city: 'Rockford, IL',          name: 'Chicago Rockford International Airport' },
+      { code: 'SPI', city: 'Springfield, IL',       name: 'Abraham Lincoln Capital Airport' },
+      // ── INDIANA ────────────────────────────────────────────────────
+      { code: 'EVV', city: 'Evansville, IN',        name: 'Evansville Regional Airport' },
+      { code: 'FWA', city: 'Fort Wayne, IN',        name: 'Fort Wayne International Airport' },
+      { code: 'IND', city: 'Indianapolis, IN',      name: 'Indianapolis International Airport' },
+      { code: 'SBN', city: 'South Bend, IN',        name: 'South Bend International Airport' },
+      // ── IOWA ───────────────────────────────────────────────────────
+      { code: 'CID', city: 'Cedar Rapids, IA',      name: 'Eastern Iowa Airport' },
+      { code: 'DSM', city: 'Des Moines, IA',        name: 'Des Moines International Airport' },
+      { code: 'DBQ', city: 'Dubuque, IA',           name: 'Dubuque Regional Airport' },
+      { code: 'SUX', city: 'Sioux City, IA',        name: 'Sioux Gateway Airport' },
+      { code: 'ALO', city: 'Waterloo, IA',          name: 'Waterloo Regional Airport' },
+      // ── KANSAS ─────────────────────────────────────────────────────
+      { code: 'GCK', city: 'Garden City, KS',       name: 'Garden City Regional Airport' },
+      { code: 'HYS', city: 'Hays, KS',             name: 'Hays Regional Airport' },
+      { code: 'MHK', city: 'Manhattan, KS',         name: 'Manhattan Regional Airport' },
+      { code: 'SLN', city: 'Salina, KS',            name: 'Salina Regional Airport' },
+      { code: 'ICT', city: 'Wichita, KS',           name: 'Wichita Dwight D. Eisenhower National Airport' },
+      // ── KENTUCKY ───────────────────────────────────────────────────
+      { code: 'CVG', city: 'Cincinnati/Covington, KY', name: 'Cincinnati/Northern Kentucky International' },
+      { code: 'LEX', city: 'Lexington, KY',         name: 'Blue Grass Airport' },
+      { code: 'SDF', city: 'Louisville, KY',        name: 'Louisville Muhammad Ali International Airport' },
+      { code: 'OWB', city: 'Owensboro, KY',         name: 'Owensboro–Daviess County Regional Airport' },
+      { code: 'PAH', city: 'Paducah, KY',           name: 'Barkley Regional Airport' },
+      // ── LOUISIANA ──────────────────────────────────────────────────
+      { code: 'AEX', city: 'Alexandria, LA',        name: 'Alexandria International Airport' },
+      { code: 'BTR', city: 'Baton Rouge, LA',       name: 'Baton Rouge Metropolitan Airport' },
+      { code: 'LFT', city: 'Lafayette, LA',         name: 'Lafayette Regional Airport' },
+      { code: 'LCH', city: 'Lake Charles, LA',      name: 'Lake Charles Regional Airport' },
+      { code: 'MLU', city: 'Monroe, LA',            name: 'Monroe Regional Airport' },
+      { code: 'MSY', city: 'New Orleans, LA',       name: 'Louis Armstrong New Orleans International' },
+      { code: 'SHV', city: 'Shreveport, LA',        name: 'Shreveport Regional Airport' },
+      // ── MAINE ──────────────────────────────────────────────────────
+      { code: 'BGR', city: 'Bangor, ME',            name: 'Bangor International Airport' },
+      { code: 'PWM', city: 'Portland, ME',          name: 'Portland International Jetport' },
+      { code: 'PQI', city: 'Presque Isle, ME',      name: 'Presque Isle International Airport' },
+      // ── MARYLAND ───────────────────────────────────────────────────
+      { code: 'BWI', city: 'Baltimore, MD',         name: 'Baltimore/Washington International Airport' },
+      { code: 'HGR', city: 'Hagerstown, MD',        name: 'Hagerstown Regional Airport' },
+      { code: 'SBY', city: 'Salisbury, MD',         name: 'Salisbury Regional Airport' },
+      // ── MASSACHUSETTS ──────────────────────────────────────────────
+      { code: 'BOS', city: 'Boston, MA',            name: 'Logan International Airport' },
+      { code: 'HYA', city: 'Hyannis, MA',           name: 'Cape Cod Gateway Airport' },
+      { code: 'ACK', city: 'Nantucket, MA',         name: 'Nantucket Memorial Airport' },
+      { code: 'MVY', city: 'Vineyard Haven, MA',    name: "Martha's Vineyard Airport" },
+      { code: 'ORH', city: 'Worcester, MA',         name: 'Worcester Regional Airport' },
+      // ── MICHIGAN ───────────────────────────────────────────────────
+      { code: 'APN', city: 'Alpena, MI',            name: 'Alpena County Regional Airport' },
+      { code: 'DTW', city: 'Detroit, MI',           name: 'Detroit Metro Wayne County Airport' },
+      { code: 'FNT', city: 'Flint, MI',             name: 'Bishop International Airport' },
+      { code: 'GRR', city: 'Grand Rapids, MI',      name: 'Gerald R. Ford International Airport' },
+      { code: 'AZO', city: 'Kalamazoo, MI',         name: 'Kalamazoo/Battle Creek International Airport' },
+      { code: 'LAN', city: 'Lansing, MI',           name: 'Capital Region International Airport' },
+      { code: 'MBS', city: 'Saginaw, MI',           name: 'MBS International Airport' },
+      { code: 'TVC', city: 'Traverse City, MI',     name: 'Cherry Capital Airport' },
+      // ── MINNESOTA ──────────────────────────────────────────────────
+      { code: 'BJI', city: 'Bemidji, MN',           name: 'Bemidji Regional Airport' },
+      { code: 'BRD', city: 'Brainerd, MN',          name: 'Brainerd Lakes Regional Airport' },
+      { code: 'DLH', city: 'Duluth, MN',            name: 'Duluth International Airport' },
+      { code: 'HIB', city: 'Hibbing, MN',           name: 'Range Regional Airport' },
+      { code: 'MSP', city: 'Minneapolis, MN',       name: 'Minneapolis–Saint Paul International Airport' },
+      { code: 'RST', city: 'Rochester, MN',         name: 'Rochester International Airport' },
+      { code: 'STC', city: 'St. Cloud, MN',         name: 'St. Cloud Regional Airport' },
+      // ── MISSISSIPPI ────────────────────────────────────────────────
+      { code: 'GTR', city: 'Columbus, MS',          name: 'Golden Triangle Regional Airport' },
+      { code: 'GPT', city: 'Gulfport/Biloxi, MS',  name: 'Gulfport–Biloxi International Airport' },
+      { code: 'JAN', city: 'Jackson, MS',           name: 'Jackson–Medgar Wiley Evers International' },
+      { code: 'MEI', city: 'Meridian, MS',          name: 'Key Field' },
+      { code: 'TUP', city: 'Tupelo, MS',            name: 'Tupelo Regional Airport' },
+      // ── MISSOURI ───────────────────────────────────────────────────
+      { code: 'BKG', city: 'Branson, MO',           name: 'Branson Airport' },
+      { code: 'COU', city: 'Columbia, MO',          name: 'Columbia Regional Airport' },
+      { code: 'JLN', city: 'Joplin, MO',            name: 'Joplin Regional Airport' },
+      { code: 'MCI', city: 'Kansas City, MO',       name: 'Kansas City International Airport' },
+      { code: 'STL', city: 'St. Louis, MO',         name: 'St. Louis Lambert International Airport' },
+      { code: 'SGF', city: 'Springfield, MO',       name: 'Springfield–Branson National Airport' },
+      // ── MONTANA ────────────────────────────────────────────────────
+      { code: 'BIL', city: 'Billings, MT',          name: 'Billings Logan International Airport' },
+      { code: 'BZN', city: 'Bozeman, MT',           name: 'Bozeman Yellowstone International Airport' },
+      { code: 'BTM', city: 'Butte, MT',             name: 'Bert Mooney Airport' },
+      { code: 'GTF', city: 'Great Falls, MT',       name: 'Great Falls International Airport' },
+      { code: 'HLN', city: 'Helena, MT',            name: 'Helena Regional Airport' },
+      { code: 'FCA', city: 'Kalispell, MT',         name: 'Glacier Park International Airport' },
+      { code: 'MSO', city: 'Missoula, MT',          name: 'Missoula Montana Airport' },
+      // ── NEBRASKA ───────────────────────────────────────────────────
+      { code: 'GRI', city: 'Grand Island, NE',      name: 'Central Nebraska Regional Airport' },
+      { code: 'LNK', city: 'Lincoln, NE',           name: 'Lincoln Airport' },
+      { code: 'LBF', city: 'North Platte, NE',      name: 'North Platte Regional Airport' },
+      { code: 'OMA', city: 'Omaha, NE',             name: 'Eppley Airfield' },
+      { code: 'BFF', city: 'Scottsbluff, NE',       name: 'Western Nebraska Regional Airport' },
+      // ── NEVADA ─────────────────────────────────────────────────────
+      { code: 'EKO', city: 'Elko, NV',             name: 'Elko Regional Airport' },
+      { code: 'LAS', city: 'Las Vegas, NV',         name: 'Harry Reid International Airport' },
+      { code: 'RNO', city: 'Reno, NV',             name: 'Reno/Tahoe International Airport' },
+      // ── NEW HAMPSHIRE ──────────────────────────────────────────────
+      { code: 'MHT', city: 'Manchester, NH',        name: 'Manchester–Boston Regional Airport' },
+      { code: 'PSM', city: 'Portsmouth, NH',        name: 'Portsmouth International Airport at Pease' },
+      // ── NEW JERSEY ─────────────────────────────────────────────────
+      { code: 'ACY', city: 'Atlantic City, NJ',     name: 'Atlantic City International Airport' },
+      { code: 'EWR', city: 'Newark, NJ',            name: 'Newark Liberty International Airport' },
+      { code: 'TTN', city: 'Trenton, NJ',           name: 'Trenton–Mercer Airport' },
+      // ── NEW MEXICO ─────────────────────────────────────────────────
+      { code: 'ABQ', city: 'Albuquerque, NM',       name: 'Albuquerque International Sunport' },
+      { code: 'HOB', city: 'Hobbs, NM',             name: 'Lea County Regional Airport' },
+      { code: 'ROW', city: 'Roswell, NM',           name: 'Roswell Air Center' },
+      { code: 'SAF', city: 'Santa Fe, NM',          name: 'Santa Fe Municipal Airport' },
+      // ── NEW YORK ───────────────────────────────────────────────────
+      { code: 'ALB', city: 'Albany, NY',            name: 'Albany International Airport' },
+      { code: 'BGM', city: 'Binghamton, NY',        name: 'Greater Binghamton Airport' },
+      { code: 'BUF', city: 'Buffalo, NY',           name: 'Buffalo Niagara International Airport' },
+      { code: 'ELM', city: 'Elmira/Corning, NY',    name: 'Elmira/Corning Regional Airport' },
+      { code: 'ITH', city: 'Ithaca, NY',            name: 'Ithaca Tompkins International Airport' },
+      { code: 'JFK', city: 'New York, NY',          name: 'John F. Kennedy International Airport' },
+      { code: 'LGA', city: 'New York, NY',          name: 'LaGuardia Airport' },
+      { code: 'ISP', city: 'Long Island (Islip), NY', name: 'Long Island MacArthur Airport' },
+      { code: 'SWF', city: 'Newburgh, NY',          name: 'New York Stewart International Airport' },
+      { code: 'IAG', city: 'Niagara Falls, NY',     name: 'Niagara Falls International Airport' },
+      { code: 'PBG', city: 'Plattsburgh, NY',       name: 'Plattsburgh International Airport' },
+      { code: 'ROC', city: 'Rochester, NY',         name: 'Frederick Douglass/Greater Rochester International' },
+      { code: 'SYR', city: 'Syracuse, NY',          name: 'Syracuse Hancock International Airport' },
+      { code: 'ART', city: 'Watertown, NY',         name: 'Watertown International Airport' },
+      { code: 'HPN', city: 'White Plains, NY',      name: 'Westchester County Airport' },
+      // ── NORTH CAROLINA ─────────────────────────────────────────────
+      { code: 'AVL', city: 'Asheville, NC',         name: 'Asheville Regional Airport' },
+      { code: 'CLT', city: 'Charlotte, NC',         name: 'Charlotte Douglas International Airport' },
+      { code: 'FAY', city: 'Fayetteville, NC',      name: 'Fayetteville Regional Airport' },
+      { code: 'GSO', city: 'Greensboro, NC',        name: 'Piedmont Triad International Airport' },
+      { code: 'PGV', city: 'Greenville, NC',        name: 'Pitt–Greenville Airport' },
+      { code: 'OAJ', city: 'Jacksonville, NC',      name: 'Albert J. Ellis Airport' },
+      { code: 'EWN', city: 'New Bern, NC',          name: 'Coastal Carolina Regional Airport' },
+      { code: 'RDU', city: 'Raleigh, NC',           name: 'Raleigh–Durham International Airport' },
+      { code: 'ILM', city: 'Wilmington, NC',        name: 'Wilmington International Airport' },
+      // ── NORTH DAKOTA ───────────────────────────────────────────────
+      { code: 'BIS', city: 'Bismarck, ND',          name: 'Bismarck Municipal Airport' },
+      { code: 'DIK', city: 'Dickinson, ND',         name: 'Dickinson Theodore Roosevelt Regional Airport' },
+      { code: 'FAR', city: 'Fargo, ND',             name: 'Hector International Airport' },
+      { code: 'GFK', city: 'Grand Forks, ND',       name: 'Grand Forks International Airport' },
+      { code: 'JMS', city: 'Jamestown, ND',         name: 'Jamestown Regional Airport' },
+      { code: 'MOT', city: 'Minot, ND',             name: 'Minot International Airport' },
+      { code: 'XWA', city: 'Williston, ND',         name: 'Williston Basin International Airport' },
+      // ── OHIO ───────────────────────────────────────────────────────
+      { code: 'CAK', city: 'Akron/Canton, OH',      name: 'Akron–Canton Airport' },
+      { code: 'CLE', city: 'Cleveland, OH',         name: 'Cleveland Hopkins International Airport' },
+      { code: 'CMH', city: 'Columbus, OH',          name: 'John Glenn Columbus International Airport' },
+      { code: 'DAY', city: 'Dayton, OH',            name: 'James M. Cox Dayton International Airport' },
+      { code: 'TOL', city: 'Toledo, OH',            name: 'Eugene F. Kranz Toledo Express Airport' },
+      // ── OKLAHOMA ───────────────────────────────────────────────────
+      { code: 'LAW', city: 'Lawton, OK',            name: 'Lawton–Fort Sill Regional Airport' },
+      { code: 'OKC', city: 'Oklahoma City, OK',     name: 'Will Rogers World Airport' },
+      { code: 'SWO', city: 'Stillwater, OK',        name: 'Stillwater Regional Airport' },
+      { code: 'TUL', city: 'Tulsa, OK',             name: 'Tulsa International Airport' },
+      // ── OREGON ─────────────────────────────────────────────────────
+      { code: 'EUG', city: 'Eugene, OR',            name: 'Mahlon Sweet Field' },
+      { code: 'MFR', city: 'Medford, OR',           name: 'Rogue Valley International–Medford Airport' },
+      { code: 'OTH', city: 'North Bend, OR',        name: 'Southwest Oregon Regional Airport' },
+      { code: 'PDX', city: 'Portland, OR',          name: 'Portland International Airport' },
+      { code: 'RDM', city: 'Redmond, OR',           name: 'Roberts Field' },
+      // ── PENNSYLVANIA ───────────────────────────────────────────────
+      { code: 'ABE', city: 'Allentown, PA',         name: 'Lehigh Valley International Airport' },
+      { code: 'AOO', city: 'Altoona, PA',           name: 'Altoona–Blair County Airport' },
+      { code: 'ERI', city: 'Erie, PA',              name: 'Erie International Airport' },
+      { code: 'MDT', city: 'Harrisburg, PA',        name: 'Harrisburg International Airport' },
+      { code: 'JST', city: 'Johnstown, PA',         name: 'John Murtha Johnstown–Cambria County Airport' },
+      { code: 'PHL', city: 'Philadelphia, PA',      name: 'Philadelphia International Airport' },
+      { code: 'PIT', city: 'Pittsburgh, PA',        name: 'Pittsburgh International Airport' },
+      { code: 'SCE', city: 'State College, PA',     name: 'State College Regional Airport' },
+      { code: 'AVP', city: 'Wilkes-Barre, PA',      name: 'Wilkes-Barre/Scranton International Airport' },
+      // ── RHODE ISLAND ───────────────────────────────────────────────
+      { code: 'PVD', city: 'Providence, RI',        name: 'Rhode Island T.F. Green International Airport' },
+      // ── SOUTH CAROLINA ─────────────────────────────────────────────
+      { code: 'CHS', city: 'Charleston, SC',        name: 'Charleston International Airport' },
+      { code: 'CAE', city: 'Columbia, SC',          name: 'Columbia Metropolitan Airport' },
+      { code: 'FLO', city: 'Florence, SC',          name: 'Florence Regional Airport' },
+      { code: 'GSP', city: 'Greenville, SC',        name: 'Greenville–Spartanburg International Airport' },
+      { code: 'HHH', city: 'Hilton Head, SC',       name: 'Hilton Head Airport' },
+      { code: 'MYR', city: 'Myrtle Beach, SC',      name: 'Myrtle Beach International Airport' },
+      // ── SOUTH DAKOTA ───────────────────────────────────────────────
+      { code: 'ABR', city: 'Aberdeen, SD',          name: 'Aberdeen Regional Airport' },
+      { code: 'PIR', city: 'Pierre, SD',            name: 'Pierre Regional Airport' },
+      { code: 'RAP', city: 'Rapid City, SD',        name: 'Rapid City Regional Airport' },
+      { code: 'FSD', city: 'Sioux Falls, SD',       name: 'Sioux Falls Regional Airport' },
+      // ── TENNESSEE ──────────────────────────────────────────────────
+      { code: 'CHA', city: 'Chattanooga, TN',       name: 'Chattanooga Metropolitan Airport' },
+      { code: 'TYS', city: 'Knoxville, TN',         name: 'McGhee Tyson Airport' },
+      { code: 'MEM', city: 'Memphis, TN',           name: 'Memphis International Airport' },
+      { code: 'BNA', city: 'Nashville, TN',         name: 'Nashville International Airport' },
+      { code: 'TRI', city: 'Tri-Cities, TN',        name: 'Tri-Cities Airport' },
+      // ── TEXAS ──────────────────────────────────────────────────────
+      { code: 'ABI', city: 'Abilene, TX',           name: 'Abilene Regional Airport' },
+      { code: 'AMA', city: 'Amarillo, TX',          name: 'Rick Husband Amarillo International Airport' },
+      { code: 'AUS', city: 'Austin, TX',            name: 'Austin–Bergstrom International Airport' },
+      { code: 'BPT', city: 'Beaumont, TX',          name: 'Jack Brooks Regional Airport' },
+      { code: 'BRO', city: 'Brownsville, TX',       name: 'Brownsville/South Padre Island International' },
+      { code: 'CLL', city: 'College Station, TX',   name: 'Easterwood Field' },
+      { code: 'CRP', city: 'Corpus Christi, TX',    name: 'Corpus Christi International Airport' },
+      { code: 'DAL', city: 'Dallas, TX',            name: 'Dallas Love Field' },
+      { code: 'DFW', city: 'Dallas–Fort Worth, TX', name: 'Dallas Fort Worth International Airport' },
+      { code: 'DRT', city: 'Del Rio, TX',           name: 'Del Rio International Airport' },
+      { code: 'ELP', city: 'El Paso, TX',           name: 'El Paso International Airport' },
+      { code: 'HRL', city: 'Harlingen, TX',         name: 'Valley International Airport' },
+      { code: 'IAH', city: 'Houston, TX',           name: 'George Bush Intercontinental Airport' },
+      { code: 'HOU', city: 'Houston, TX',           name: 'William P. Hobby Airport' },
+      { code: 'GRK', city: 'Killeen, TX',           name: 'Killeen Regional Airport' },
+      { code: 'LRD', city: 'Laredo, TX',            name: 'Laredo International Airport' },
+      { code: 'GGG', city: 'Longview, TX',          name: 'East Texas Regional Airport' },
+      { code: 'LBB', city: 'Lubbock, TX',           name: 'Lubbock Preston Smith International Airport' },
+      { code: 'MFE', city: 'McAllen, TX',           name: 'McAllen Miller International Airport' },
+      { code: 'MAF', city: 'Midland/Odessa, TX',    name: 'Midland International Air and Space Port' },
+      { code: 'SJT', city: 'San Angelo, TX',        name: 'San Angelo Regional Airport' },
+      { code: 'SAT', city: 'San Antonio, TX',       name: 'San Antonio International Airport' },
+      { code: 'TYR', city: 'Tyler, TX',             name: 'Tyler Pounds Regional Airport' },
+      { code: 'ACT', city: 'Waco, TX',              name: 'Waco Regional Airport' },
+      { code: 'SPS', city: 'Wichita Falls, TX',     name: 'Wichita Falls Municipal Airport' },
+      // ── UTAH ───────────────────────────────────────────────────────
+      { code: 'CDC', city: 'Cedar City, UT',        name: 'Cedar City Regional Airport' },
+      { code: 'CNY', city: 'Moab, UT',              name: 'Canyonlands Regional Airport' },
+      { code: 'OGD', city: 'Ogden, UT',             name: 'Ogden–Hinckley Airport' },
+      { code: 'PVU', city: 'Provo, UT',             name: 'Provo Municipal Airport' },
+      { code: 'SGU', city: 'St. George, UT',        name: 'St. George Regional Airport' },
+      { code: 'SLC', city: 'Salt Lake City, UT',    name: 'Salt Lake City International Airport' },
+      // ── VERMONT ────────────────────────────────────────────────────
+      { code: 'BTV', city: 'Burlington, VT',        name: 'Patrick Leahy Burlington International Airport' },
+      // ── VIRGINIA ───────────────────────────────────────────────────
+      { code: 'CHO', city: 'Charlottesville, VA',   name: 'Charlottesville–Albemarle Airport' },
+      { code: 'LYH', city: 'Lynchburg, VA',         name: 'Lynchburg Regional Airport' },
+      { code: 'PHF', city: 'Newport News, VA',      name: 'Newport News/Williamsburg International Airport' },
+      { code: 'ORF', city: 'Norfolk, VA',           name: 'Norfolk International Airport' },
+      { code: 'RIC', city: 'Richmond, VA',          name: 'Richmond International Airport' },
+      { code: 'ROA', city: 'Roanoke, VA',           name: 'Roanoke–Blacksburg Regional Airport' },
+      { code: 'DCA', city: 'Washington D.C.',       name: 'Ronald Reagan Washington National Airport' },
+      { code: 'IAD', city: 'Washington D.C.',       name: 'Dulles International Airport' },
+      // ── WASHINGTON ─────────────────────────────────────────────────
+      { code: 'BLI', city: 'Bellingham, WA',        name: 'Bellingham International Airport' },
+      { code: 'PAE', city: 'Everett, WA',           name: 'Paine Field (Snohomish County Airport)' },
+      { code: 'PSC', city: 'Pasco, WA',             name: 'Tri-Cities Airport' },
+      { code: 'PUW', city: 'Pullman, WA',           name: 'Pullman–Moscow Regional Airport' },
+      { code: 'BFI', city: 'Seattle, WA',           name: 'King County International Airport (Boeing Field)' },
+      { code: 'SEA', city: 'Seattle/Tacoma, WA',    name: 'Seattle–Tacoma International Airport' },
+      { code: 'GEG', city: 'Spokane, WA',           name: 'Spokane International Airport' },
+      { code: 'ALW', city: 'Walla Walla, WA',       name: 'Walla Walla Regional Airport' },
+      { code: 'EAT', city: 'Wenatchee, WA',         name: 'Pangborn Memorial Airport' },
+      { code: 'YKM', city: 'Yakima, WA',            name: 'Yakima Air Terminal' },
+      // ── WEST VIRGINIA ──────────────────────────────────────────────
+      { code: 'CRW', city: 'Charleston, WV',        name: 'Yeager Airport' },
+      { code: 'CKB', city: 'Clarksburg, WV',        name: 'North Central West Virginia Airport' },
+      { code: 'HTS', city: 'Huntington, WV',        name: 'Tri-State Airport' },
+      // ── WISCONSIN ──────────────────────────────────────────────────
+      { code: 'ATW', city: 'Appleton, WI',          name: 'Appleton International Airport' },
+      { code: 'EAU', city: 'Eau Claire, WI',        name: 'Chippewa Valley Regional Airport' },
+      { code: 'GRB', city: 'Green Bay, WI',         name: 'Green Bay–Austin Straubel International Airport' },
+      { code: 'LSE', city: 'La Crosse, WI',         name: 'La Crosse Regional Airport' },
+      { code: 'MSN', city: 'Madison, WI',           name: 'Dane County Regional Airport' },
+      { code: 'MKE', city: 'Milwaukee, WI',         name: 'Milwaukee Mitchell International Airport' },
+      { code: 'CWA', city: 'Mosinee, WI',           name: 'Central Wisconsin Airport' },
+      { code: 'RHI', city: 'Rhinelander, WI',       name: 'Rhinelander–Oneida County Airport' },
+      // ── WYOMING ────────────────────────────────────────────────────
+      { code: 'CPR', city: 'Casper, WY',            name: 'Casper–Natrona County International Airport' },
+      { code: 'COD', city: 'Cody, WY',              name: 'Yellowstone Regional Airport' },
+      { code: 'GCC', city: 'Gillette, WY',          name: 'Gillette–Campbell County Airport' },
+      { code: 'JAC', city: 'Jackson, WY',           name: 'Jackson Hole Airport' },
+      { code: 'LAR', city: 'Laramie, WY',           name: 'Laramie Regional Airport' },
+      { code: 'RIW', city: 'Riverton, WY',          name: 'Central Wyoming Regional Airport' },
+      { code: 'RKS', city: 'Rock Springs, WY',      name: 'Southwest Wyoming Regional Airport' },
+      { code: 'SHR', city: 'Sheridan, WY',          name: 'Sheridan County Airport' },
+      // ── TERRITORIES ────────────────────────────────────────────────
+      { code: 'GUM', city: 'Agana, GU',             name: 'Antonio B. Won Pat International Airport' },
+      { code: 'SPN', city: 'Saipan, MP',            name: 'Saipan International Airport' },
+      { code: 'BQN', city: 'Aguadilla, PR',         name: 'Rafael Hernández Airport' },
+      { code: 'PSE', city: 'Ponce, PR',             name: 'Mercedita Airport' },
+      { code: 'SIG', city: 'San Juan, PR',          name: 'Fernando Luis Ribas Dominicci Airport' },
+      { code: 'SJU', city: 'San Juan, PR',          name: 'Luis Muñoz Marín International Airport' },
+      { code: 'STT', city: 'St. Thomas, VI',        name: 'Cyril E. King Airport' },
+      { code: 'STX', city: 'St. Croix, VI',         name: 'Henry E. Rohlsen Airport' },
+    ];
+
+    function setupAutocomplete(inputId, dropdownId) {
+      const input    = document.getElementById(inputId);
+      const dropdown = document.getElementById(dropdownId);
+      let activeIdx  = -1;
+
+      function renderItems(matches) {
+        dropdown.innerHTML = '';
+        activeIdx = -1;
+        if (matches.length === 0) { dropdown.classList.add('hidden'); return; }
+
+        matches.forEach((airport, i) => {
+          const li = document.createElement('li');
+          li.setAttribute('data-agent-read', `suggestion-${airport.code}`);
+          li.className = [
+            'flex items-center gap-3 px-4 py-3 cursor-pointer text-sm',
+            'hover:bg-blue-50 transition-colors border-b border-slate-100 last:border-0',
+          ].join(' ');
+          li.innerHTML = `
+            <span class="bg-blue-100 text-blue-700 font-bold text-xs rounded px-2 py-0.5 shrink-0">${airport.code}</span>
+            <span class="text-slate-700">${airport.city}
+              <span class="text-slate-400 font-normal">&mdash; ${airport.name}</span>
+            </span>`;
+          li.addEventListener('mousedown', (e) => {
+            e.preventDefault(); // keep focus on input briefly so blur doesn't race
+            input.value = `${airport.city} (${airport.code})`;
+            dropdown.classList.add('hidden');
+          });
+          dropdown.appendChild(li);
+        });
+
+        dropdown.classList.remove('hidden');
+      }
+
+      function highlight(idx) {
+        const items = dropdown.querySelectorAll('li');
+        items.forEach((li, i) => {
+          li.classList.toggle('bg-blue-50', i === idx);
+        });
+      }
+
+      input.addEventListener('input', () => {
+        const q = input.value.trim().toLowerCase();
+        if (q.length < 1) { dropdown.classList.add('hidden'); return; }
+        const matches = AIRPORTS.filter(a =>
+          a.code.toLowerCase().includes(q) ||
+          a.city.toLowerCase().includes(q) ||
+          a.name.toLowerCase().includes(q)
+        ).slice(0, 6);
+        renderItems(matches);
+      });
+
+      input.addEventListener('keydown', (e) => {
+        const items = dropdown.querySelectorAll('li');
+        if (!items.length) return;
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          activeIdx = Math.min(activeIdx + 1, items.length - 1);
+          highlight(activeIdx);
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          activeIdx = Math.max(activeIdx - 1, 0);
+          highlight(activeIdx);
+        } else if (e.key === 'Enter' && activeIdx >= 0) {
+          e.preventDefault();
+          items[activeIdx].dispatchEvent(new Event('mousedown'));
+        } else if (e.key === 'Escape') {
+          dropdown.classList.add('hidden');
+        }
+      });
+
+      input.addEventListener('blur', () => {
+        setTimeout(() => dropdown.classList.add('hidden'), 150);
+      });
+
+      input.addEventListener('focus', () => {
+        if (input.value.trim().length >= 1) input.dispatchEvent(new Event('input'));
+      });
+    }
+
+    setupAutocomplete('origin',      'dropdown-origin');
+    setupAutocomplete('destination', 'dropdown-destination');
+
+    // ── ADA Agent panel toggle ─────────────────────────────────────
+    const agentPanel = document.getElementById('ada-agent-container');
+
+    document.getElementById('agent-tab-toggle').addEventListener('click', () => {
+      agentPanel.classList.toggle('hidden');
+    });
+
+    document.getElementById('agent-panel-close').addEventListener('click', () => {
+      agentPanel.classList.add('hidden');
+    });
+  </script>
+
+</body>
+</html>
