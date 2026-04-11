@@ -151,6 +151,32 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # --- Route by type ---
 
+            if msg.type == MessageType.PAGE_INIT:
+                if not msg.page_context:
+                    await _send_error(websocket, session_id, "Missing 'page_context' for page_init.")
+                    continue
+
+                try:
+                    speech = await _llm_client.get_page_description(msg.page_context)
+                except Exception as llm_err:
+                    logger.exception("LLM error during page_init for session %s", session_id)
+                    await _send_error(websocket, session_id, f"LLM error: {llm_err}")
+                    continue
+
+                # Seed history so follow-up conversation has context
+                _sessions[session_id].append({"role": "assistant", "content": speech})
+
+                await websocket.send_text(
+                    OutgoingMessage(
+                        type=MessageType.AGENT_RESPONSE,
+                        session_id=session_id,
+                        speech=speech,
+                        actions=[],
+                        needs_clarification=False,
+                    ).model_dump_json()
+                )
+                continue
+
             if msg.type == MessageType.PING:
                 await websocket.send_text(
                     OutgoingMessage(type=MessageType.PONG, session_id=session_id).model_dump_json()

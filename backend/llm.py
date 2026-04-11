@@ -20,6 +20,18 @@ from models import AgentResponse, PageContext, FormField, PageButton
 # Shared prompt
 # ---------------------------------------------------------------------------
 
+PAGE_INIT_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
+A user with a disability has just opened this page. Your job is to greet them and describe what's on the page.
+
+Tell them:
+- What the page is for (in plain language)
+- The key form fields available and what each one is for
+- The main actions they can take
+
+Then end with a single clear question asking how you can help them get started.
+Keep the entire response under 60 words. Speak naturally — it will be read aloud via text-to-speech. No markdown, no lists.
+"""
+
 SYSTEM_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
 Your job is to help users with disabilities interact with web pages using only their voice.
 
@@ -73,6 +85,11 @@ class BaseLLMClient(ABC):
     ) -> AgentResponse:
         ...
 
+    @abstractmethod
+    async def get_page_description(self, page_context: PageContext) -> str:
+        """Describe the page to the user on widget init. Returns plain speech text."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Claude implementation  (Anthropic SDK, tool-use)
@@ -116,6 +133,18 @@ class ClaudeClient(BaseLLMClient):
                 return AgentResponse.model_validate(block.input)
 
         raise RuntimeError("Claude returned no tool_use block — unexpected response format.")
+
+    async def get_page_description(self, page_context: PageContext) -> str:
+        response = await self._client.messages.create(
+            model=settings.claude_model,
+            max_tokens=256,
+            system=PAGE_INIT_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"--- Page context ---\n{_build_page_context_str(page_context)}",
+            }],
+        )
+        return response.content[0].text
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +197,17 @@ class OpenAIClient(BaseLLMClient):
 
         raw = response.choices[0].message.content or "{}"
         return AgentResponse.model_validate_json(raw)
+
+    async def get_page_description(self, page_context: PageContext) -> str:
+        response = await self._client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": PAGE_INIT_PROMPT},
+                {"role": "user", "content": f"--- Page context ---\n{_build_page_context_str(page_context)}"},
+            ],
+            max_tokens=256,
+        )
+        return response.choices[0].message.content or ""
 
 
 # ---------------------------------------------------------------------------
