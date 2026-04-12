@@ -8,18 +8,28 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 class ActionType(str, Enum):
-    FILL = "fill"        # Set value on an input/textarea
-    CLICK = "click"      # Click a button, link, or any element
-    SELECT = "select"    # Choose an option in a <select> dropdown
-    SCROLL = "scroll"    # Scroll to bring an element into view
-    FOCUS = "focus"      # Move keyboard focus to an element
-    CLEAR = "clear"      # Clear the current value of an input
+    FOCUS = "focus"        # Move keyboard focus to element — always before fill/select
+    CLEAR = "clear"        # Clear existing value before typing new one
+    FILL = "fill"          # Simulate typing into an input/textarea (fires input + change events)
+    SELECT = "select"      # Choose an option in a <select> dropdown
+    MULTI_SELECT = "multi_select"  # Add a value to a <select multiple> or toggle a chip/tag in a custom multiselect
+    DESELECT = "deselect"  # Remove a specific value from a multiselect (clicks the × on a chip, or deselects native option)
+    CLICK = "click"        # Simulate a real mouse click (mousedown → mouseup → click)
+    SCROLL = "scroll"      # Scroll element into view before interacting
+    KEY_PRESS = "key_press"      # Press a keyboard key — use for Tab (field nav), Enter (submit), Escape
+    SEARCH_SELECT = "search_select"  # Type into a dynamic autocomplete/combobox, wait for options, click match
 
 
 class DOMAction(BaseModel):
     type: ActionType
     selector: str = Field(description="CSS selector for the target element")
-    value: Optional[str] = Field(None, description="Value for fill/select actions")
+    value: Optional[str] = Field(
+        None,
+        description=(
+            "For fill/select: the value to set. "
+            "For key_press: the key name — 'Tab', 'Enter', 'Escape'."
+        )
+    )
     description: Optional[str] = Field(None, description="Human-readable description of this action")
 
 
@@ -29,6 +39,7 @@ class DOMAction(BaseModel):
 
 class AgentResponse(BaseModel):
     speech: str = Field(
+        default="",
         description="What the assistant should say aloud to the user via TTS"
     )
     actions: list[DOMAction] = Field(
@@ -54,6 +65,8 @@ class FormField(BaseModel):
     required: bool = False
     options: Optional[list[str]] = None  # Only populated for <select> elements
     aria_label: Optional[str] = None
+    multiple: bool = False  # True if this is a multi-select field
+    selected_values: Optional[list[str]] = None  # Currently selected values for multi-select fields
 
 
 class PageButton(BaseModel):
@@ -63,11 +76,21 @@ class PageButton(BaseModel):
     disabled: bool = False
 
 
+class ResultItem(BaseModel):
+    selector: str
+    text: str = Field(description="Visible text of the result card — includes price, airline, times, etc. (max 300 chars)")
+    index: int = Field(description="0-based position in the result list")
+
+
 class PageContext(BaseModel):
     url: str
     title: str
     fields: list[FormField] = Field(default_factory=list)
     buttons: list[PageButton] = Field(default_factory=list)
+    result_items: list[ResultItem] = Field(
+        default_factory=list,
+        description="Visible result cards / list rows (flight results, search results, etc.) — used for queries like 'find the cheapest'"
+    )
 
 
 # ---------------------------------------------------------------------------

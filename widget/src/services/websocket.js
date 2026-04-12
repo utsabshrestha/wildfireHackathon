@@ -44,8 +44,14 @@ export function getPageContext() {
 
     // Collect <option> values for <select> elements
     let options = undefined
+    let multiple = false
+    let selected_values = undefined
     if (el.tagName === 'SELECT') {
       options = Array.from(el.options).map((o) => o.text || o.value).filter(Boolean)
+      multiple = el.multiple || false
+      if (multiple) {
+        selected_values = Array.from(el.selectedOptions).map((o) => o.text || o.value).filter(Boolean)
+      }
     }
 
     fields.push({
@@ -57,6 +63,8 @@ export function getPageContext() {
       required: el.required || false,
       options,
       aria_label: el.getAttribute('aria-label') || undefined,
+      multiple,
+      selected_values,
     })
   })
 
@@ -80,12 +88,114 @@ export function getPageContext() {
       })
     })
 
+  // Scan result items — finds cards/rows that contain prices and action buttons.
+  // Works on any site: discovers structure by reading visible content, not
+  // by relying on special attributes we added to the page.
+  const resultItems = _scanResultCards()
+
   return {
     url: window.location.href,
     title: document.title,
     fields,
     buttons,
+    result_items: resultItems,
   }
+}
+
+function _isVisible(el) {
+  const s = window.getComputedStyle(el)
+  return s.display !== 'none' && s.visibility !== 'hidden' && !!el.offsetParent
+}
+
+/**
+ * Find result cards on the page by locating action buttons and walking up
+ * to their surrounding content block.
+ *
+ * Works on any site without requiring special attributes:
+ *   1. Find every visible action button (non-submit, non-nav)
+ *   2. Walk up the DOM to find the smallest ancestor that contains
+ *      meaningful context text (price, description, etc.)
+ *   3. Capture that card's visible text + a reliable selector for the button
+ *
+ * The LLM reads the text ("$189 · CloudHop Air · 1 Stop") and clicks
+ * the button selector to act — exactly as a user would.
+ */
+function _scanResultCards() {
+  const cards = []
+  const seenCards = new Set()
+
+  // Buttons outside forms that are likely to be "action" buttons on result cards
+  const SKIP_TEXTS = new Set(['close', 'menu', 'search', 'sign in', 'log in', 'sign up', 'back'])
+  const candidates = Array.from(
+    document.querySelectorAll('button:not([type="submit"]), a[role="button"]')
+  ).filter((btn) => {
+    if (!_isVisible(btn)) return false
+    if (btn.closest('nav, header, footer, form')) return false
+    const text = (btn.textContent || '').trim().toLowerCase()
+    return text.length > 0 && text.length < 60 && !SKIP_TEXTS.has(text)
+  })
+
+  for (const btn of candidates) {
+    const btnText = (btn.textContent || '').trim()
+
+    // Walk up from the button looking for a "card" — an ancestor that has
+    // substantially more visible text than just the button, capped at a
+    // reasonable size so we don't capture entire page sections.
+    let card = btn.parentElement
+    while (card && card !== document.body) {
+      const cardText = (card.textContent || '').trim()
+      const isCard = cardText.length > btnText.length + 30 && cardText.length < 700
+      if (isCard) break
+      card = card.parentElement
+    }
+
+    if (!card || card === document.body || seenCards.has(card)) continue
+    seenCards.add(card)
+
+    const text = (card.textContent || '').trim().replace(/\s+/g, ' ')
+    if (text.length < 20) continue
+
+    cards.push({
+      selector: _buildSelector(btn),
+      text: text.slice(0, 300),
+      index: cards.length,
+    })
+  }
+
+  return cards
+}
+
+/**
+ * Build the most stable CSS selector for an element, in priority order:
+ *   id → unique data attribute → path from nearest identified ancestor
+ */
+function _buildSelector(el) {
+  if (el.id) return `#${CSS.escape(el.id)}`
+
+  // Use the first data-* attribute that looks like a stable identifier
+  for (const attr of el.attributes) {
+    if (attr.name.startsWith('data-') && attr.value && !['data-v', 'data-reactid'].some(p => attr.name.startsWith(p))) {
+      return `[${attr.name}="${CSS.escape(attr.value)}"]`
+    }
+  }
+
+  // Build a path down from the nearest ancestor that has an id or unique data attr
+  const path = []
+  let node = el
+  while (node && node !== document.body) {
+    if (node.id) {
+      path.unshift(`#${CSS.escape(node.id)}`)
+      break
+    }
+    const tag = node.tagName.toLowerCase()
+    const siblings = node.parentElement
+      ? Array.from(node.parentElement.children).filter((c) => c.tagName === node.tagName)
+      : [node]
+    const nth = siblings.indexOf(node) + 1
+    path.unshift(nth > 1 ? `${tag}:nth-of-type(${nth})` : tag)
+    node = node.parentElement
+  }
+  return path.join(' > ')
 }
 
 // ── DOM change observer ───────────────────────────────────────────────────
