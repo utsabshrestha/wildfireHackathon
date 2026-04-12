@@ -99,6 +99,9 @@ export function getPageContext() {
   // by relying on special attributes we added to the page.
   const resultItems = _scanResultCards()
 
+  // Merge calendar day cells into the buttons list so the LLM can click them.
+  buttons.push(..._captureCalendarCells())
+
   return {
     url: window.location.href,
     title: document.title,
@@ -226,6 +229,72 @@ function _extractChipText(chip) {
     '[class*="close"],[class*="remove"],[class*="delete"],[class*="clear"]'
   ).forEach(el => el.remove())
   return (clone.textContent || '').trim().replace(/\s+/g, ' ').replace(/[×✕✖]/g, '').trim()
+}
+
+/**
+ * Detect open calendar / date-picker grids and return their available day cells
+ * as button-shaped objects so the LLM can click a specific day.
+ *
+ * Labelled "Calendar day N" so the LLM knows these are date cells, not
+ * generic buttons, and applies the calendar interaction rules from the system prompt.
+ *
+ * @returns {object[]} button-shaped objects  { selector, text, disabled }
+ */
+function _captureCalendarCells() {
+  const cells = []
+
+  // Any element that looks like an open calendar grid
+  const grids = Array.from(document.querySelectorAll(
+    '[role="grid"], [role="calendar"], ' +
+    '[class*="calendar"]:not([class*="icon"]):not([class*="logo"]), ' +
+    '[class*="datepicker"], [class*="date-picker"], [class*="DayPicker"], ' +
+    '[class*="react-calendar"], [class*="flatpickr-calendar"]'
+  )).filter(_isVisible)
+
+  if (grids.length === 0) return cells
+
+  const seen = new Set()
+
+  for (const grid of grids) {
+    // Find individual day cells — td/span/div with a day number, not disabled
+    const candidates = grid.querySelectorAll(
+      '[role="gridcell"], ' +
+      'td:not([disabled]):not([aria-disabled="true"]), ' +
+      '[class*="day"]:not([class*="disabled"]):not([class*="outside"]):not([class*="blocked"])'
+    )
+
+    for (const cell of candidates) {
+      if (!_isVisible(cell)) continue
+
+      // Extract day number — skip non-day cells (headers, empty cells, etc.)
+      const raw = (cell.textContent || '').trim().replace(/\s+/g, ' ')
+      const num = parseInt(raw, 10)
+      if (!num || num < 1 || num > 31 || raw.length > 4) continue
+
+      // Skip disabled cells
+      if (
+        cell.getAttribute('aria-disabled') === 'true' ||
+        cell.hasAttribute('disabled') ||
+        /disabled|blocked|unavailable/.test(cell.className || '')
+      ) continue
+
+      const selector = _buildSelector(cell)
+      if (seen.has(selector)) continue
+      seen.add(selector)
+
+      // Use aria-label if present (may include full date, e.g. "April 15, 2026")
+      const ariaLabel = cell.getAttribute('aria-label') || ''
+
+      cells.push({
+        selector,
+        text: `Calendar day ${num}${ariaLabel ? ' (' + ariaLabel + ')' : ''}`,
+        aria_label: ariaLabel || undefined,
+        disabled: false,
+      })
+    }
+  }
+
+  return cells
 }
 
 /**

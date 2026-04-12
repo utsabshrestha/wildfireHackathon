@@ -46,6 +46,7 @@ export function Widget({ config }) {
   const pendingFailuresRef = useRef([])    // action failures queued to send after TTS ends
   const consecutiveFailuresRef = useRef(0) // how many feedback rounds in a row without user input
   const isExecutingRef = useRef(false)     // true while an agent_response is being acted on
+  const wasReconnectingRef = useRef(false) // true between 'reconnecting' and next 'connected'
 
   const addMessage = useCallback((role, text) => {
     setMessages((prev) => [...prev, { role, text, timestamp: Date.now() }])
@@ -307,18 +308,42 @@ export function Widget({ config }) {
       setTimeout(() => setErrorMessage(null), 4000)
     })
 
+    ws.on('connected', () => {
+      // Fires on both first connect (handled by initialize()) and on auto-reconnect.
+      // Only act on reconnect — first connect is fully orchestrated by initialize().
+      if (!wasReconnectingRef.current) return
+      wasReconnectingRef.current = false
+      console.log('[widget] Reconnected — resuming session')
+      setErrorMessage(null)
+      _clearResponseTimeout()
+      pendingFailuresRef.current = []
+      isExecutingRef.current = false
+      // Re-send page_init so the backend re-greets and we resume from a clean state.
+      if (sessionIdRef.current) {
+        ws.sendPageInit(sessionIdRef.current)
+        // STT will restart automatically after the greeting TTS ends (onEnd handler)
+      }
+    })
+
     ws.on('disconnected', () => {
-      setStatus((prev) =>
-        prev === 'listening' || prev === 'processing' ? prev : 'disconnected'
-      )
+      // Stop listening immediately — no point holding the mic open with no connection.
+      sttRef.current?.stop()
+      isTTSPlayingRef.current = false
+      ttsRef.current?.stop()
+      _clearResponseTimeout()
+      setStatus('disconnected')
     })
 
     ws.on('reconnecting', ({ attempt }) => {
+      wasReconnectingRef.current = true
       setStatus('disconnected')
       setErrorMessage(`Connection lost. Reconnecting... (${attempt}/5)`)
     })
 
     ws.on('max_reconnect_reached', () => {
+      wasReconnectingRef.current = false
+      sttRef.current?.stop()
+      ttsRef.current?.stop()
       setStatus('error')
       setErrorMessage('Unable to reconnect to server. Please refresh the page.')
     })

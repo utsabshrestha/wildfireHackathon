@@ -24,7 +24,7 @@ from models import AgentResponse, PageContext
 async def _execute_web_search(query: str) -> str:
     """Run a DuckDuckGo text search and return the top results as a plain string."""
     try:
-        from duckduckgo_search import DDGS  # imported lazily so the app works without it
+        from ddgs import DDGS  # imported lazily so the app works without it
 
         def _sync_search():
             with DDGS() as ddgs:
@@ -139,6 +139,300 @@ COMPARE_FLIGHTS_TOOL = {
 }
 
 
+async def _playwright_flights(
+    origin: str, destination: str, date: str, return_date: str | None = None
+) -> str:
+    """
+    Use a headless Chromium browser to search Google Flights and extract prices.
+    No API key required — install once with:
+        pip install playwright && playwright install chromium
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return "PLAYWRIGHT_NOT_INSTALLED"
+
+    from datetime import datetime
+    from urllib.parse import quote
+
+    date_obj = None
+    for fmt in ("%Y-%m-%d", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%m/%d/%Y"):
+        try:
+            date_obj = datetime.strptime(date.strip(), fmt)
+            break
+        except ValueError:
+            continue
+
+    if not date_obj:
+        return f"Could not parse date '{date}' for flight search."
+
+    # Google Flights direct search URL
+    gf_date = date_obj.strftime("%Y-%m-%d")
+    orig = origin.strip().upper()
+    dest = destination.strip().upper()
+    gf_url = (
+        f"https://www.google.com/travel/flights/search?"
+        f"tfs=CBwQAhoeEgoyMDI2LTA1LTAxagcIARID{orig}cgcIARID{dest}"
+        f"&hl=en&curr=USD"
+    )
+    # Simpler fallback: Google search flight panel
+    search_url = (
+        f"https://www.google.com/search?q="
+        + quote(f"flights {origin} to {destination} {date_obj.strftime('%B %d %Y')} price USD")
+        + "&hl=en&gl=us"
+    )
+
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(headless=True)
+        except Exception as launch_err:
+            if "Executable doesn't exist" in str(launch_err):
+                return "PLAYWRIGHT_NOT_INSTALLED"
+            raise
+        ctx = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+            viewport={"width": 1280, "height": 900},
+        )
+        page = await ctx.new_page()
+
+        # Try Google search (most reliable for flight price snippet)
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
+        await page.wait_for_timeout(3000)
+
+        # Extract text from the flights knowledge panel if present, else full body
+        flight_text = ""
+        for selector in [
+            '[data-flt-ve]',          # Google Flights widget in SERP
+            '[jscontroller*="ppdwi"]', # flight price panel
+            '.HiHjCd',                 # flight card class
+            'div[role="main"]',        # main content
+        ]:
+            try:
+                loc = page.locator(selector).first
+                if await loc.count() > 0:
+                    flight_text = await loc.inner_text(timeout=2000)
+                    if len(flight_text) > 100:
+                        break
+            except Exception:
+                continue
+
+        if not flight_text or len(flight_text) < 100:
+            flight_text = await page.inner_text("body")
+
+        await browser.close()
+
+    cleaned = " ".join(flight_text.split())[:3000]
+    return (
+        f"=== Live Google Flights data: {origin} → {destination} on {date} ===\n"
+        + cleaned
+    )
+
+
+async def _kiwi_flights(
+    origin: str, destination: str, date: str, return_date: str | None = None
+) -> str:
+    """Fetch live flight data from Kiwi Tequila API (free tier).
+    Register at tequila.kiwi.com to get a free API key.
+    """
+    from urllib.request import Request, urlopen
+    from urllib.parse import urlencode
+    from datetime import datetime
+
+    # Parse flexible date input → DD/MM/YYYY (Kiwi format)
+    date_obj = None
+    for fmt in ("%Y-%m-%d", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%m/%d/%Y"):
+        try:
+            date_obj = datetime.strptime(date.strip(), fmt)
+            break
+        except ValueError:
+            continue
+
+    if not date_obj:
+        return f"Could not parse date '{date}' for Kiwi flight search."
+
+    kiwi_date = date_obj.strftime("%d/%m/%Y")
+
+    params: dict = {
+        "fly_from": origin.strip().upper(),
+        "fly_to": destination.strip().upper(),
+        "date_from": kiwi_date,
+        "date_to": kiwi_date,
+        "curr": "USD",
+        "sort": "price",
+        "limit": 5,
+        "one_for_city": 1,
+    }
+    if return_date:
+        ret_obj = None
+        for fmt in ("%Y-%m-%d", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%m/%d/%Y"):
+            try:
+                ret_obj = datetime.strptime(return_date.strip(), fmt)
+                break
+            except ValueError:
+                continue
+        if ret_obj:
+            params["return_from"] = ret_obj.strftime("%d/%m/%Y")
+            params["return_to"]   = ret_obj.strftime("%d/%m/%Y")
+            params["flight_type"] = "round"
+        else:
+            params["flight_type"] = "oneway"
+    else:
+        params["flight_type"] = "oneway"
+
+    url = f"https://api.tequila.kiwi.com/v2/search?{urlencode(params)}"
+
+    def _sync_fetch():
+        req = Request(url, headers={"apikey": settings.kiwi_api_key})
+        with urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, _sync_fetch)
+
+    flights = data.get("data", [])
+    if not flights:
+        return f"Kiwi: No flights found for {origin} → {destination} on {date}."
+
+    lines = [f"=== Kiwi.com live prices: {origin} → {destination} on {date} ==="]
+    for f in flights:
+        price    = f.get("price", "?")
+        airlines = ", ".join(
+            seg.get("airline", "") for seg in f.get("route", []) if seg.get("airline")
+        ) or "?"
+        duration = f.get("duration", {}).get("total", 0) // 60  # seconds → minutes
+        stops    = max(0, len(f.get("route", [])) - 1)
+        stop_str = "nonstop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
+        deep     = f.get("deep_link", "")
+        lines.append(f"  ${price:.0f} — {airlines} — {duration} min — {stop_str}")
+        if deep:
+            lines.append(f"    Book: {deep}")
+
+    return "\n".join(lines)
+
+
+async def _firecrawl_scrape(url: str) -> str:
+    """Scrape a JavaScript-rendered URL via Firecrawl and return its markdown content."""
+    def _sync_scrape():
+        from firecrawl import FirecrawlApp  # imported lazily — optional dependency
+        app = FirecrawlApp(api_key=settings.firecrawl_api_key)
+        result = app.scrape_url(url, params={"formats": ["markdown"]})
+        return result.get("markdown") or result.get("content") or ""
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_scrape)
+
+
+async def _firecrawl_flights(
+    origin: str, destination: str, date: str, return_date: str | None = None
+) -> str:
+    """Scrape Kayak and Skyscanner flight results via Firecrawl."""
+    # Normalise date: accept "April 15 2026", "2026-04-15", etc.
+    # Kayak wants YYYY-MM-DD, Skyscanner wants YYMMDD
+    import re
+    from datetime import datetime
+
+    # Try to parse flexible date formats
+    date_obj = None
+    for fmt in ("%Y-%m-%d", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%m/%d/%Y"):
+        try:
+            date_obj = datetime.strptime(date.strip(), fmt)
+            break
+        except ValueError:
+            continue
+
+    if not date_obj:
+        return f"Could not parse date '{date}' for Firecrawl flight search."
+
+    kayak_date = date_obj.strftime("%Y-%m-%d")       # 2026-04-15
+    sky_date   = date_obj.strftime("%y%m%d")          # 260415
+
+    orig = origin.upper().replace(" ", "")
+    dest = destination.upper().replace(" ", "")
+
+    urls = {
+        "Kayak":      f"https://www.kayak.com/flights/{orig}-{dest}/{kayak_date}",
+        "Skyscanner": f"https://www.skyscanner.com/transport/flights/{orig.lower()}/{dest.lower()}/{sky_date}/",
+    }
+
+    if return_date:
+        ret_obj = None
+        for fmt in ("%Y-%m-%d", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%m/%d/%Y"):
+            try:
+                ret_obj = datetime.strptime(return_date.strip(), fmt)
+                break
+            except ValueError:
+                continue
+        if ret_obj:
+            kayak_ret = ret_obj.strftime("%Y-%m-%d")
+            sky_ret   = ret_obj.strftime("%y%m%d")
+            urls["Kayak"]      = f"https://www.kayak.com/flights/{orig}-{dest}/{kayak_date}/{kayak_ret}"
+            urls["Skyscanner"] = (
+                f"https://www.skyscanner.com/transport/flights/{orig.lower()}/{dest.lower()}"
+                f"/{sky_date}/{sky_ret}/"
+            )
+
+    results = []
+    for site, url in urls.items():
+        try:
+            content = await _firecrawl_scrape(url)
+            # Keep only the first 2000 chars — enough for price data, avoids noise
+            snippet = content[:2000].strip() if content else "No data returned."
+            results.append(f"--- {site} ({url}) ---\n{snippet}")
+        except Exception as exc:
+            results.append(f"--- {site} ---\nScrape failed: {exc}")
+
+    return "\n\n".join(results) if results else "No results from Firecrawl."
+
+
+async def _serpapi_flights(
+    origin: str, destination: str, date: str, return_date: str | None = None
+) -> str:
+    """Fetch real-time flight data from Google Flights via SerpAPI."""
+    from urllib.request import urlopen
+    from urllib.parse import urlencode
+
+    params = {
+        "engine": "google_flights",
+        "departure_id": origin,
+        "arrival_id": destination,
+        "outbound_date": date,
+        "api_key": settings.serpapi_api_key,
+        "currency": "USD",
+        "hl": "en",
+        "type": "1" if return_date else "2",
+    }
+    if return_date:
+        params["return_date"] = return_date
+
+    url = f"https://serpapi.com/search?{urlencode(params)}"
+
+    def _sync_fetch():
+        with urlopen(url, timeout=15) as resp:  # noqa: S310
+            return json.loads(resp.read().decode())
+
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, _sync_fetch)
+
+    lines = [f"=== Google Flights: {origin} → {destination} on {date} ==="]
+    for key in ("best_flights", "other_flights"):
+        for flight in data.get(key, [])[:5]:
+            price = flight.get("price", "?")
+            airlines = ", ".join(
+                f.get("airline", "") for f in flight.get("flights", []) if f.get("airline")
+            )
+            duration = flight.get("total_duration", "?")
+            stops = len(flight.get("layovers", []))
+            stop_str = "nonstop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
+            lines.append(f"  ${price} — {airlines} — {duration} min — {stop_str}")
+
+    return "\n".join(lines) if len(lines) > 1 else "No flights found for this route and date."
+
+
 async def _execute_flight_comparison(
     origin: str, destination: str, date: str, return_date: str | None = None
 ) -> str:
@@ -147,18 +441,48 @@ async def _execute_flight_comparison(
     if return_date:
         trip += f" returning {return_date}"
 
-    # Use queries that surface travel aggregator articles and cached price pages
-    # rather than trying to scrape booking sites directly (those block crawlers).
-    queries = [
-        f"{origin} {destination} flight price {date} USD cheapest",
-        f"{origin} to {destination} cheapest flight {date} airline price comparison",
-        f"Kayak OR Skyscanner {origin} {destination} flight {date} price",
-    ]
-
     parts = [f"=== Flight comparison: {trip} ===\n"]
-    for query in queries:
-        result = await _execute_web_search(query)
-        parts.append(result)
+
+    # Kiwi Tequila — free live flight data (register at tequila.kiwi.com)
+    if settings.kiwi_api_key:
+        try:
+            parts.append(await _kiwi_flights(origin, destination, date, return_date))
+        except Exception as exc:
+            parts.append(f"Kiwi lookup failed: {exc}")
+
+    # Firecrawl — scrapes Kayak + Skyscanner live (paid, but more sources)
+    if settings.firecrawl_api_key:
+        try:
+            parts.append(await _firecrawl_flights(origin, destination, date, return_date))
+        except Exception as exc:
+            parts.append(f"Firecrawl scrape failed: {exc}")
+
+    # SerpAPI — Google Flights structured JSON (paid)
+    elif settings.serpapi_api_key:
+        try:
+            parts.append(await _serpapi_flights(origin, destination, date, return_date))
+        except Exception as exc:
+            parts.append(f"Google Flights lookup failed: {exc}")
+
+    # No paid key configured — try Playwright first, then targeted web searches
+    if not any([settings.kiwi_api_key, settings.firecrawl_api_key, settings.serpapi_api_key]):
+        pw_result = await _playwright_flights(origin, destination, date, return_date)
+        if pw_result == "PLAYWRIGHT_NOT_INSTALLED":
+            # Playwright not available — run targeted DuckDuckGo queries that tend to
+            # return actual price snippets from booking aggregators
+            for query in [
+                f'"{origin}" "{destination}" flight {date} price "$"',
+                f"cheapest flight {origin} to {destination} {date} USD booking",
+                f"{origin} {destination} {date} flight fare comparison inurl:kayak OR inurl:skyscanner",
+            ]:
+                parts.append(await _execute_web_search(query))
+            # Also pull Reddit/travel community prices for this route
+            parts.append(await _execute_travel_insights(
+                origin, destination,
+                context=f"cheapest price {date} typical fare community reports"
+            ))
+        else:
+            parts.append(pw_result)
 
     return "\n\n---\n\n".join(parts)
 
@@ -276,6 +600,18 @@ DOM interaction rules — simulate a real human user:
 7. To submit a form, click the submit button. Never use key_press Enter on a field unless it is a search box with no submit button.
 8. Never chain multiple fills without Tab between them.
 
+Calendar / date picker interaction:
+- Booking sites use CUSTOM calendar grids, not native date inputs — fill does NOT work on them.
+- The page context exposes calendar day cells as buttons labelled "Calendar day N"
+  (e.g. "Calendar day 15") once the calendar is open.
+- To pick a date:
+    a. click the date field to open the calendar.
+    b. If the displayed month is wrong, click the prev/next arrow buttons shown in the buttons list.
+    c. Click the "Calendar day N" button matching the target day.
+- For combined check-in / check-out calendars: click check-in day first; the calendar stays open,
+  then click the check-out day.
+- NEVER use fill or search_select on a calendar date picker.
+
 Handling result items (flight cards, search results):
 - Result items appear in the page context under "Result items" when search results are shown.
 - Each item has an index, its full visible text (price, airline, times, etc.), and a selector.
@@ -334,12 +670,12 @@ better prices, even if they don't use the word "compare". Triggers include:
 - Price concern: "seems expensive", "is this good?", "can I find cheaper?", "too much", "that's a lot"
 - Alternatives: "any better options?", "other flights?", "what else is there?", "look elsewhere"
 - Value check: "is this a good deal?", "what do others pay?", "worth it?", "is that normal?"
-After getting results, summarise the top 2–3 options across sites (airline, price, key differences)
-in ≤ 50 words. Do NOT execute any DOM actions — just speak the comparison and ask what the user prefers.
-If the search results don't contain live prices from a specific site, share what you DID find and offer
-to search for a specific alternative (e.g. "I found prices starting at $X from [source]. Want me to
-search specifically for [airline] or a connecting route that might be cheaper?"). Never say "check
-[site] manually".
+After getting results, synthesise into a confident ≤ 50 word spoken summary:
+  price range found, airlines, whether it's competitive, one specific money-saving tip if available.
+Do NOT execute any DOM actions — just speak the summary and ask what the user wants to do.
+NEVER say "I wasn't able to pull prices from X" or "unfortunately" or list sites you couldn't reach.
+Just use whatever data you have. If data is sparse, say "Based on what I found, prices start around $X
+— want me to dig deeper?" and offer to retry with a more specific query.
 
 Travel insights — call get_travel_insights:
 - PROACTIVELY whenever flight search results appear in the page context (result_items present)

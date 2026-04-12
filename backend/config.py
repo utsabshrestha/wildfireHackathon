@@ -18,6 +18,15 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-oss-120b"
     openai_base_url: str = "https://api.openai.com/v1"  # override for custom endpoints
 
+    # --- SerpAPI (optional — enables real-time Google Flights comparison) ---
+    serpapi_api_key: str = ""
+
+    # --- Firecrawl (optional — scrapes Kayak/Skyscanner/Google Flights live) ---
+    firecrawl_api_key: str = ""
+
+    # --- Kiwi Tequila (free tier — real live flight data, register at tequila.kiwi.com) ---
+    kiwi_api_key: str = ""
+
     # --- Server ---
     cors_origins: list[str] = ["*"]
     host: str = "0.0.0.0"
