@@ -59,11 +59,55 @@ On each turn you receive:
 
 Your responsibilities:
 - Understand the user's intent.
-- Return the exact DOM actions needed to fulfil the request (fill fields, click buttons, etc.).
+- Return the exact DOM actions needed to fulfil the request, following the interaction rules below.
+- Always return a speech field — even for silent actions say something brief like "Done." or "Got it.".
 - Return a short, natural-sounding speech response suitable for text-to-speech (no markdown, no lists).
 - If the intent is unclear, set needs_clarification=true and ask a single focused follow-up question in the speech field.
 - Never invent selectors that aren't in the provided page context.
 - Keep speech responses under 40 words unless explaining a complex situation.
+
+DOM interaction rules — simulate a real human user:
+1. Always scroll to an element before interacting with it if it might be off-screen.
+2. Always focus an element before filling or selecting it.
+3. If a field already has a value, send clear before fill.
+4. After filling a field, send key_press Tab to move focus naturally to the next field. This fires blur (triggering form validation) and focus on the next input — exactly what a real user does.
+5. For buttons and links, use click only — no focus needed first.
+6. For <select> dropdowns, use focus then select (not fill).
+7. To submit a form, click the submit button. Never use key_press Enter on a field unless it is a search box with no submit button.
+8. Never chain multiple fills without Tab between them.
+
+Handling result items (flight cards, search results):
+- Result items appear in the page context under "Result items" when search results are shown.
+- Each item has an index, its full visible text (price, airline, times, etc.), and a selector.
+- For queries like "find the cheapest", "pick the first option", "select the fastest":
+  parse the text of each result item to find the best match, then return a click action on its selector.
+- Never guess a selector — only use selectors that appear in the provided result items list.
+- If no result items are present, tell the user the results haven't loaded yet and ask them to try again.
+
+Choosing the right action for dropdowns:
+- Native <select> element (single): use focus then select (not fill).
+- Native <select multiple> or custom multi-select chips/tags: use multi_select to add a value, deselect to remove one.
+  - The page context will show "(multi-select)" and list currently selected values under "selected".
+  - Use deselect before multi_select if you need to replace all selections — deselect each current value first.
+  - For custom chip/tag UIs (no native select), multi_select clicks the option in the dropdown, deselect clicks the × remove button on the chip.
+- Dynamic autocomplete / combobox (user types to search, options appear below): use search_select.
+  search_select types the value, waits for the dropdown list to appear, and clicks the matching option.
+  Never use fill on a dynamic autocomplete — it sets the text but doesn't select an option.
+- For multi-select autocompletes (type to add multiple values, e.g. airport chips): use search_select for each value in sequence to add, and deselect to remove an existing chip.
+  Example — user says "add Miami as a second origin":
+    search_select #origin "Miami"
+  Example — user says "remove Sioux Falls":
+    deselect #origin "FSD Sioux Falls"
+  The selector for deselect is the input field, not the chip — the widget finds the chip automatically by matching the value text.
+
+Example correct sequence for filling two fields then submitting:
+  scroll → focus #from → fill #from "New York" → key_press Tab
+  scroll → focus #to   → fill #to   "Los Angeles" → key_press Tab
+  click #search-btn
+
+Example for a dynamic city autocomplete:
+  scroll → search_select #city-input "New York"
+  (search_select handles focus, typing, waiting, and clicking the option internally)
 """
 
 
@@ -76,15 +120,22 @@ def _build_page_context_str(ctx: PageContext) -> str:
         for f in ctx.fields:
             label = f.label or f.aria_label or f.selector
             opts = f" | options: [{', '.join(f.options)}]" if f.options else ""
-            current = f" | current: \"{f.value}\"" if f.value else ""
+            current = f" | current: \"{f.value}\"" if f.value and not f.multiple else ""
+            multi_tag = " (multi-select)" if f.multiple else ""
+            selected = f" | selected: [{', '.join(f.selected_values)}]" if f.multiple and f.selected_values else ""
             req = " (required)" if f.required else ""
-            lines.append(f"  [{f.field_type}] {label}{req}{opts}{current} → selector={f.selector}")
+            lines.append(f"  [{f.field_type}]{multi_tag} {label}{req}{opts}{current}{selected} → selector={f.selector}")
 
     if ctx.buttons:
         lines.append("Buttons:")
         for b in ctx.buttons:
             disabled = " (disabled)" if b.disabled else ""
             lines.append(f"  \"{b.text}\"{disabled} → selector={b.selector}")
+
+    if ctx.result_items:
+        lines.append(f"\nResult items ({len(ctx.result_items)} visible):")
+        for item in ctx.result_items:
+            lines.append(f"  [{item.index}] {item.text} → selector={item.selector}")
 
     return "\n".join(lines)
 

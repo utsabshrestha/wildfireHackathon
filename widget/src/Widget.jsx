@@ -34,11 +34,34 @@ export function Widget({ config }) {
   const wsRef = useRef(null)
   const sttRef = useRef(null)
   const ttsRef = useRef(null)
-  const sessionIdRef = useRef(null)   // set once, lives for the tab session
-  const domObserverRef = useRef(null) // teardown fn returned by observeDomChanges
+  const sessionIdRef = useRef(null)    // set once, lives for the tab session
+  const domObserverRef = useRef(null)  // teardown fn returned by observeDomChanges
+  const responseTimeoutRef = useRef(null)
 
   const addMessage = useCallback((role, text) => {
     setMessages((prev) => [...prev, { role, text, timestamp: Date.now() }])
+  }, [])
+
+  // ── Response timeout ──────────────────────────────────────────────────────
+  // Started whenever we send speech and are waiting for a backend reply.
+  // Clears on agent_response or backend error. Resets the widget to idle
+  // if neither arrives within 15 s so the user is never stuck in 'processing'.
+
+  const _startResponseTimeout = useCallback(() => {
+    if (responseTimeoutRef.current) clearTimeout(responseTimeoutRef.current)
+    responseTimeoutRef.current = setTimeout(() => {
+      console.warn('[widget] Response timeout — resetting to idle')
+      setStatus('idle')
+      setErrorMessage('No response from server. Please try again.')
+      setTimeout(() => setErrorMessage(null), 4000)
+    }, 15000)
+  }, [])
+
+  const _clearResponseTimeout = useCallback(() => {
+    if (responseTimeoutRef.current) {
+      clearTimeout(responseTimeoutRef.current)
+      responseTimeoutRef.current = null
+    }
   }, [])
 
   // ── Initialize STT + TTS on mount (no session needed yet) ────────────────
@@ -64,6 +87,7 @@ export function Widget({ config }) {
         setStatus('processing')
         setErrorMessage(null)
         wsRef.current?.sendSpeech(transcript, sessionIdRef.current)
+        _startResponseTimeout()
       },
       onError: (msg) => {
         console.error('[widget] STT error:', msg)
@@ -104,16 +128,26 @@ export function Widget({ config }) {
     ws.setSessionId(sessionId)
     wsRef.current = ws
 
-    ws.on('agent_response', (msg) => {
-      // Actions first (fill fields), then speak — so TTS describes what was done
+    ws.on('agent_response', async (msg) => {
+      _clearResponseTimeout()
       if (Array.isArray(msg.actions) && msg.actions.length > 0) {
         console.log('[widget] Executing DOM actions:', msg.actions)
-        executeDomActions(msg.actions)
+        await executeDomActions(msg.actions)
       }
       if (msg.speech) {
         addMessage('agent', msg.speech)
         ttsRef.current?.speak(msg.speech)
+      } else {
+        setStatus('idle')
       }
+    })
+
+    ws.on('error', (msg) => {
+      _clearResponseTimeout()
+      console.error('[widget] Backend error:', msg.error)
+      setStatus('idle')
+      setErrorMessage(msg.error || 'Something went wrong. Please try again.')
+      setTimeout(() => setErrorMessage(null), 4000)
     })
 
     ws.on('disconnected', () => {
@@ -231,6 +265,7 @@ export function Widget({ config }) {
 
   async function handleClose() {
     setIsOpen(false)
+    _clearResponseTimeout()
     sttRef.current?.stop()
     ttsRef.current?.stop()
     setStatus('idle')
