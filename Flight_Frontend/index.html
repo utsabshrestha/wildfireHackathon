@@ -778,14 +778,20 @@
     // ── Extract airport code from "City, ST (XYZ)" ─────────────────
     function extractCode(val) {
       const m = val.match(/\(([A-Z]{3})\)/);
-      return m ? m[1] : (val.trim().toUpperCase().slice(0, 3) || '???');
+      return m ? m[1] : null;  // null = not a properly selected airport
+    }
+
+    // ── Find airport by field value (returns null if not a valid selection) ──
+    function findAirport(val) {
+      const code = extractCode(val);
+      if (!code) return null;
+      return AIRPORTS.find(a => a.code === code) || null;
     }
 
     // ── Dynamically update flight card airport labels ───────────────
     function updateFlightCards(originVal, destVal) {
       const orig = extractCode(originVal);
       const dest = extractCode(destVal);
-      // Update all JFK/LAX labels in the route sections
       document.querySelectorAll('[data-agent-read$="-departure-time"]').forEach(el => {
         const codeEl = el.parentElement.querySelector('p:last-child');
         if (codeEl) codeEl.textContent = orig;
@@ -794,9 +800,8 @@
         const codeEl = el.parentElement.querySelector('p:last-child');
         if (codeEl) codeEl.textContent = dest;
       });
-      // Route label in heading
       const label = document.getElementById('results-route-label');
-      if (label) label.textContent = `${extractCode(originVal)} → ${extractCode(destVal)}`;
+      if (label) label.textContent = `${orig} → ${dest}`;
     }
 
     // ── Clear error styling on input ───────────────────────────────
@@ -842,21 +847,40 @@
 
     // ── Search Flights ─────────────────────────────────────────────
     document.getElementById('btn-search').addEventListener('click', () => {
-      const okO = validateField('origin');
-      const okD = validateField('destination');
       const okDt = validateField('departure-date');
-      if (!okO || !okD || !okDt) {
-        showToast('Please fill in origin, destination, and date.');
+      const originVal = document.getElementById('origin').value.trim();
+      const destVal   = document.getElementById('destination').value.trim();
+
+      // Require airports selected from the autocomplete (value must contain "(XXX)")
+      const originAirport = findAirport(originVal);
+      const destAirport   = findAirport(destVal);
+
+      if (!originAirport) {
+        document.getElementById('origin').classList.add('input-error', 'shake');
+        setTimeout(() => document.getElementById('origin').classList.remove('shake'), 450);
+        showToast('Please select a valid origin airport from the suggestions.');
         return;
       }
+      if (!destAirport) {
+        document.getElementById('destination').classList.add('input-error', 'shake');
+        setTimeout(() => document.getElementById('destination').classList.remove('shake'), 450);
+        showToast('Please select a valid destination airport from the suggestions.');
+        return;
+      }
+      if (originAirport.code === destAirport.code) {
+        showToast('Origin and destination cannot be the same airport.');
+        return;
+      }
+      if (!okDt) {
+        showToast('Please select a travel date.');
+        return;
+      }
+
       const btn = document.getElementById('btn-search');
       setBtnLoading(btn, true, ' Searching…');
       setTimeout(() => {
         setBtnLoading(btn, false);
-        updateFlightCards(
-          document.getElementById('origin').value,
-          document.getElementById('destination').value
-        );
+        updateFlightCards(originVal, destVal);
         showView('view-results');
         showToast('3 flights found for your route!', 'success');
       }, 1200);

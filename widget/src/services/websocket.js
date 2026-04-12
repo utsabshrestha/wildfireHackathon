@@ -37,10 +37,14 @@ export function getPageContext() {
       ''
 
     const selector = el.id
-      ? `#${el.id}`
+      ? `#${CSS.escape(el.id)}`
       : el.name
-        ? `[name="${el.name}"]`
-        : el.tagName.toLowerCase()
+        ? `[name="${_escAttr(el.name)}"]`
+        : el.getAttribute('aria-label')
+          ? `[aria-label="${_escAttr(el.getAttribute('aria-label'))}"]`
+          : el.placeholder
+            ? `[placeholder="${_escAttr(el.placeholder)}"]`
+            : el.tagName.toLowerCase()
 
     // Collect <option> values for <select> elements
     let options = undefined
@@ -51,6 +55,14 @@ export function getPageContext() {
       multiple = el.multiple || false
       if (multiple) {
         selected_values = Array.from(el.selectedOptions).map((o) => o.text || o.value).filter(Boolean)
+      }
+    } else {
+      // For custom chip/tag multi-select UIs (e.g. airport chip inputs), detect
+      // any chip elements near this input and report them as selected_values.
+      const chipInfo = _detectChipSelections(el)
+      if (chipInfo.multiple) {
+        multiple = true
+        selected_values = chipInfo.selectedValues
       }
     }
 
@@ -74,14 +86,8 @@ export function getPageContext() {
       const text = el.textContent?.trim() || el.value || el.getAttribute('aria-label') || ''
       if (!text) return
 
-      const selector = el.id
-        ? `#${el.id}`
-        : el.className
-          ? `.${el.className.trim().split(/\s+/)[0]}`
-          : el.tagName.toLowerCase()
-
       buttons.push({
-        selector,
+        selector: _buildSelector(el),
         text,
         aria_label: el.getAttribute('aria-label') || undefined,
         disabled: el.disabled || false,
@@ -93,18 +99,202 @@ export function getPageContext() {
   // by relying on special attributes we added to the page.
   const resultItems = _scanResultCards()
 
+  // Merge calendar day cells into the buttons list so the LLM can click them.
+  buttons.push(..._captureCalendarCells())
+
   return {
     url: window.location.href,
     title: document.title,
     fields,
     buttons,
     result_items: resultItems,
+    page_errors: getPageErrors(),
   }
+}
+
+/**
+ * Scan for visible error states on the host page.
+ * Returns an array of human-readable error strings.
+ *
+ * Exported so Widget.jsx can call it directly after executing DOM actions.
+ */
+export function getPageErrors() {
+  const errors = []
+  const seen = new Set()
+
+  function add(text) {
+    const t = text.trim().slice(0, 150)
+    if (t && !seen.has(t)) { seen.add(t); errors.push(t) }
+  }
+
+  // Input-level validation errors
+  document.querySelectorAll('[aria-invalid="true"], .input-error, [data-invalid]').forEach(el => {
+    if (!_isVisible(el)) return
+    const labelEl = el.id ? document.querySelector(`label[for="${el.id}"]`) : null
+    const name = labelEl?.textContent?.trim() ||
+                 el.getAttribute('aria-label') ||
+                 el.placeholder || el.id || 'a field'
+    add(`Validation error on field: "${name}"`)
+  })
+
+  // Visible alert / live region / toast messages
+  document.querySelectorAll(
+    '[role="alert"], [role="status"], [aria-live="assertive"], [aria-live="polite"], ' +
+    '.toast, .snackbar, .alert, .notification, .error-message'
+  ).forEach(el => {
+    if (!_isVisible(el)) return
+    add(el.textContent || '')
+  })
+
+  return errors
+}
+
+/** Escape a string for use inside a CSS attribute selector value. */
+function _escAttr(val) {
+  return val.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
 function _isVisible(el) {
   const s = window.getComputedStyle(el)
   return s.display !== 'none' && s.visibility !== 'hidden' && !!el.offsetParent
+}
+
+/**
+ * For a text/search input, detect whether it is part of a chip/tag multi-select
+ * UI (e.g. airport chip selectors on flight booking sites).
+ *
+ * Walks up to 5 ancestor levels looking for a container that holds visible
+ * chip elements with a remove button (×). If found, returns the chip texts
+ * as selectedValues so the LLM knows what is already selected.
+ *
+ * Two strategies:
+ *   1. Class-based — chips with well-known CSS class patterns.
+ *   2. Structural — compact sibling elements that contain text + a remove button.
+ *
+ * @param {HTMLElement} inputEl
+ * @returns {{ multiple: boolean, selectedValues: string[] | undefined }}
+ */
+function _detectChipSelections(inputEl) {
+  const CHIP_SELECTORS = [
+    '[class*="chip"]', '[class*="tag"]', '[class*="token"]',
+    '[class*="badge"]', '[class*="pill"]',
+  ].join(',')
+
+  let node = inputEl.parentElement
+  for (let i = 0; i < 5 && node && node !== document.body; i++) {
+    // Strategy 1: elements matching known chip class patterns
+    const byClass = Array.from(node.querySelectorAll(CHIP_SELECTORS)).filter(c => {
+      if (c === inputEl || c.contains(inputEl) || inputEl.contains(c)) return false
+      if (!_isVisible(c)) return false
+      // Must have an internal remove button — plain badges/labels don't count
+      return !!(c.querySelector('button,[role="button"],svg,[aria-label*="remove" i],[aria-label*="delete" i]'))
+    })
+
+    if (byClass.length > 0) {
+      const vals = byClass.map(_extractChipText).filter(Boolean)
+      if (vals.length > 0) return { multiple: true, selectedValues: vals }
+    }
+
+    // Strategy 2: structural — direct children of this ancestor that are
+    // compact visible elements containing text + a remove button, but are
+    // NOT the input itself and NOT large containers.
+    const byStructure = Array.from(node.children).filter(child => {
+      if (child === inputEl || child.contains(inputEl)) return false
+      if (!_isVisible(child)) return false
+      const text = (child.textContent || '').trim()
+      if (!text || text.length > 100) return false
+      return !!(child.querySelector('button,[role="button"],svg'))
+    })
+
+    if (byStructure.length > 0) {
+      const vals = byStructure.map(_extractChipText).filter(Boolean)
+      if (vals.length > 0) return { multiple: true, selectedValues: vals }
+    }
+
+    node = node.parentElement
+  }
+
+  return { multiple: false, selectedValues: undefined }
+}
+
+/**
+ * Extract the visible text label from a chip element, excluding the
+ * remove button / icon text so we get just the value (e.g. "FSD Sioux Falls").
+ */
+function _extractChipText(chip) {
+  const clone = chip.cloneNode(true)
+  clone.querySelectorAll(
+    'button,[role="button"],svg,' +
+    '[aria-label*="remove" i],[aria-label*="delete" i],[aria-label*="close" i],' +
+    '[class*="close"],[class*="remove"],[class*="delete"],[class*="clear"]'
+  ).forEach(el => el.remove())
+  return (clone.textContent || '').trim().replace(/\s+/g, ' ').replace(/[×✕✖]/g, '').trim()
+}
+
+/**
+ * Detect open calendar / date-picker grids and return their available day cells
+ * as button-shaped objects so the LLM can click a specific day.
+ *
+ * Labelled "Calendar day N" so the LLM knows these are date cells, not
+ * generic buttons, and applies the calendar interaction rules from the system prompt.
+ *
+ * @returns {object[]} button-shaped objects  { selector, text, disabled }
+ */
+function _captureCalendarCells() {
+  const cells = []
+
+  // Any element that looks like an open calendar grid
+  const grids = Array.from(document.querySelectorAll(
+    '[role="grid"], [role="calendar"], ' +
+    '[class*="calendar"]:not([class*="icon"]):not([class*="logo"]), ' +
+    '[class*="datepicker"], [class*="date-picker"], [class*="DayPicker"], ' +
+    '[class*="react-calendar"], [class*="flatpickr-calendar"]'
+  )).filter(_isVisible)
+
+  if (grids.length === 0) return cells
+
+  const seen = new Set()
+
+  for (const grid of grids) {
+    // Find individual day cells — td/span/div with a day number, not disabled
+    const candidates = grid.querySelectorAll(
+      '[role="gridcell"], ' +
+      'td:not([disabled]):not([aria-disabled="true"]), ' +
+      '[class*="day"]:not([class*="disabled"]):not([class*="outside"]):not([class*="blocked"])'
+    )
+
+    for (const cell of candidates) {
+      if (!_isVisible(cell)) continue
+
+      // Extract day number — skip non-day cells (headers, empty cells, etc.)
+      const raw = (cell.textContent || '').trim().replace(/\s+/g, ' ')
+      const num = parseInt(raw, 10)
+      if (!num || num < 1 || num > 31 || raw.length > 4) continue
+
+      // Skip disabled cells
+      if (
+        cell.getAttribute('aria-disabled') === 'true' ||
+        cell.hasAttribute('disabled') ||
+        /disabled|blocked|unavailable/.test(cell.className || '')
+      ) continue
+
+      const selector = _buildSelector(cell)
+      if (seen.has(selector)) continue
+      seen.add(selector)
+
+      // Use aria-label if present (may include full date, e.g. "April 15, 2026")
+      const ariaLabel = cell.getAttribute('aria-label') || ''
+
+      cells.push({
+        selector,
+        text: `Calendar day ${num}${ariaLabel ? ' (' + ariaLabel + ')' : ''}`,
+        aria_label: ariaLabel || undefined,
+        disabled: false,
+      })
+    }
+  }
+
+  return cells
 }
 
 /**
@@ -201,44 +391,54 @@ function _buildSelector(el) {
 // ── DOM change observer ───────────────────────────────────────────────────
 
 /**
- * Observe the host page DOM for structural changes (new fields, removed fields,
- * attribute changes on inputs). When a meaningful change is detected, calls
- * the provided callback with a debounced snapshot of the new page context.
+ * Observe the host page DOM for two kinds of changes:
  *
- * We watch for:
- *   - childList mutations on the whole document (elements added/removed)
- *   - attribute mutations on inputs/selects/textareas/buttons
- *     (e.g. `id`, `name`, `disabled`, `required`, `type` changing)
+ *   1. Structural changes (new fields, removed fields, SPA navigation)
+ *      → calls `onContextChanged(pageContext)` (debounced, skipped during isMutating)
  *
- * Input `value` changes are intentionally NOT observed here — those are sent
- * with every `process_speech` as the latest page_context snapshot.
+ *   2. Error-state changes (validation alerts appearing, aria-invalid set)
+ *      → calls `onPageError(errors)` when error indicators appear organically
+ *        (NOT during isMutating, so widget's own actions don't trigger this)
  *
- * @param {(ctx: object) => void} onContextChanged - called with new page context
- * @param {number} debounceMs - quiet period before firing (default 400ms)
- * @returns {() => void} teardown function — call to stop observing
+ * @param {(ctx: object) => void}    onContextChanged - called with new page context
+ * @param {(errors: string[]) => void} [onPageError]  - called when page shows errors
+ * @param {number}                   debounceMs       - quiet period (default 400ms)
+ * @returns {() => void} teardown function
  */
-export function observeDomChanges(onContextChanged, debounceMs = 400) {
+export function observeDomChanges(onContextChanged, onPageError = null, debounceMs = 400) {
   let debounceTimer = null
+  let errorDebounceTimer = null
 
-  // The set of tag names / attributes we care about — prevents firing on
-  // every mouseover, style tweak, or animation frame update.
-  const WATCHED_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'FORM', 'LABEL'])
+  // BUTTON intentionally excluded — result cards appearing with action buttons
+  // should not trigger update_context. We only care about new form fields.
+  const WATCHED_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'FORM', 'LABEL'])
   const WATCHED_ATTRS = new Set(['id', 'name', 'type', 'disabled', 'required', 'aria-label', 'placeholder'])
 
   function scheduleUpdate() {
-    // Skip mutations caused by our own DOM actions to avoid the feedback loop:
-    // executeDomActions fills fields → MutationObserver fires → update_context → LLM fills again → loop
     if (isMutating) {
       console.log('[widget:dom-observer] Skipping mutation — widget is executing DOM actions')
       return
     }
     clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
-      // Double-check the flag hasn't been set during the debounce window
       if (isMutating) return
       console.log('[widget:dom-observer] Organic DOM change — sending update_context')
       onContextChanged(getPageContext())
     }, debounceMs)
+  }
+
+  function scheduleErrorCheck() {
+    // Only fire for organic errors — never while widget is filling fields
+    if (isMutating || !onPageError) return
+    clearTimeout(errorDebounceTimer)
+    errorDebounceTimer = setTimeout(() => {
+      if (isMutating) return
+      const errors = getPageErrors()
+      if (errors.length > 0) {
+        console.log('[widget:dom-observer] Page errors detected:', errors)
+        onPageError(errors)
+      }
+    }, 300)
   }
 
   function isWatchedNode(node) {
@@ -247,46 +447,76 @@ export function observeDomChanges(onContextChanged, debounceMs = 400) {
 
   function hasWatchedDescendant(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return false
-    // Quick check before doing a querySelector (which is more expensive)
-    return node.querySelector?.('input, select, textarea, button') !== null
+    return node.querySelector?.('input, select, textarea') !== null
+  }
+
+  /** True if this node looks like an alert / toast / error banner. */
+  function isErrorNode(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return false
+    const role = node.getAttribute?.('role') || ''
+    const ariaLive = node.getAttribute?.('aria-live') || ''
+    return role === 'alert' || role === 'status' || ariaLive === 'assertive' || ariaLive === 'polite'
   }
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      // Structural changes: nodes added or removed
       if (mutation.type === 'childList') {
-        const relevant =
-          Array.from(mutation.addedNodes).some((n) => isWatchedNode(n) || hasWatchedDescendant(n)) ||
-          Array.from(mutation.removedNodes).some((n) => isWatchedNode(n) || hasWatchedDescendant(n))
+        const addedNodes = Array.from(mutation.addedNodes)
+        const removedNodes = Array.from(mutation.removedNodes)
 
-        if (relevant) {
-          scheduleUpdate()
-          return // one update per batch is enough
+        // Check for structural form changes
+        const structuralChange =
+          addedNodes.some((n) => isWatchedNode(n) || hasWatchedDescendant(n)) ||
+          removedNodes.some((n) => isWatchedNode(n) || hasWatchedDescendant(n))
+        if (structuralChange) { scheduleUpdate(); continue }
+
+        // Check for alert/toast nodes being injected
+        if (addedNodes.some(isErrorNode)) {
+          scheduleErrorCheck()
+          continue
         }
       }
 
-      // Attribute changes on existing elements
       if (mutation.type === 'attributes') {
-        if (isWatchedNode(mutation.target) && WATCHED_ATTRS.has(mutation.attributeName)) {
+        const target = mutation.target
+        const attr = mutation.attributeName
+
+        // aria-invalid being set to "true" on any element
+        if (attr === 'aria-invalid' && target.getAttribute('aria-invalid') === 'true') {
+          scheduleErrorCheck()
+          continue
+        }
+
+        // class change that adds an error-like class
+        if (attr === 'class') {
+          const cls = target.className || ''
+          if (/error|invalid|shake/.test(cls)) {
+            scheduleErrorCheck()
+            continue
+          }
+        }
+
+        // Structural attribute changes on form elements
+        if (isWatchedNode(target) && WATCHED_ATTRS.has(attr)) {
           scheduleUpdate()
-          return
         }
       }
     }
   })
 
   observer.observe(document.body, {
-    childList: true,     // direct children added/removed
-    subtree: true,       // whole document tree
-    attributes: true,   // attribute changes
-    attributeFilter: Array.from(WATCHED_ATTRS),
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: [...Array.from(WATCHED_ATTRS), 'aria-invalid', 'class'],
   })
 
-  console.log('[widget:dom-observer] Observing DOM for context changes')
+  console.log('[widget:dom-observer] Observing DOM for context changes and errors')
 
   return () => {
     observer.disconnect()
     clearTimeout(debounceTimer)
+    clearTimeout(errorDebounceTimer)
     console.log('[widget:dom-observer] Observer disconnected')
   }
 }
@@ -411,6 +641,50 @@ export class WidgetWebSocket {
       type: 'update_context',
       session_id: sessionId,
       page_context: pageContext,
+    })
+  }
+
+  /**
+   * Send action failures + current page state back to the LLM.
+   *
+   * The LLM is asked to use its world knowledge (airports, cities, countries)
+   * to suggest a better search term and immediately retry with search_select
+   * rather than just reporting the error.
+   *
+   * @param {string[]} failures - failure strings from executeDomActions
+   * @param {string}   sessionId
+   */
+  sendActionFeedback(failures, sessionId) {
+    const summary = failures.join(' | ')
+    console.log('[widget:ws] Sending action feedback:', summary)
+    this._send({
+      type: 'process_speech',
+      session_id: sessionId,
+      text: `[SYSTEM] Action failed: ${summary}. `
+        + `Use your knowledge of airports, cities, and countries to identify the correct search term. `
+        + `For example, if "Nepal" failed, you know the main airport is Tribhuvan International (KTM) in Kathmandu — retry with search_select using "Kathmandu". `
+        + `Briefly tell the user what you're trying (e.g. "Nepal's airport is in Kathmandu, trying that") and include the corrected search_select action in your response.`,
+      page_context: getPageContext(),
+    })
+  }
+
+  /**
+   * Called after 3 consecutive failures on the same intent.
+   * Instructs the LLM to stop retrying and ask the user for help instead.
+   *
+   * @param {string[]} failures
+   * @param {string}   sessionId
+   */
+  sendGiveUp(failures, sessionId) {
+    const summary = failures.join(' | ')
+    console.warn('[widget:ws] 3 consecutive failures — sending give-up signal:', summary)
+    this._send({
+      type: 'process_speech',
+      session_id: sessionId,
+      text: `[SYSTEM] After multiple attempts the action still failed: ${summary}. `
+        + `Do NOT try again automatically. Tell the user what went wrong in plain language and ask them to `
+        + `provide a different search term, the exact airport name, or the IATA code (e.g. "JFK", "LHR").`,
+      page_context: getPageContext(),
     })
   }
 

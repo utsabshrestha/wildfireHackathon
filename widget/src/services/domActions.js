@@ -24,38 +24,50 @@ export let isMutating = false
  *
  * @param {Array<{type: string, selector: string, value?: string}>} actions
  */
+/**
+ * Execute a batch of DOM actions.
+ * Returns an array of failure strings — one per action that could not complete.
+ * An empty array means everything succeeded.
+ *
+ * @param {Array} actions
+ * @returns {Promise<string[]>} failures
+ */
 export async function executeDomActions(actions) {
-  if (!Array.isArray(actions) || actions.length === 0) return
+  if (!Array.isArray(actions) || actions.length === 0) return []
 
   isMutating = true
   console.log('[widget:dom] Executing', actions.length, 'action(s) — observer suppressed')
 
+  const failures = []
   for (const action of actions) {
     try {
-      await _executeAction(action)
+      const failure = await _executeAction(action)
+      if (failure) failures.push(failure)
     } catch (err) {
-      console.error('[widget:dom] Action failed:', action, err)
+      console.error('[widget:dom] Action threw:', action, err)
+      failures.push(`${action.type} on "${action.selector}" threw: ${err.message}`)
     }
   }
 
-  // Keep the flag set for a short buffer so React/Vue re-renders triggered
-  // by our events are also suppressed before we re-enable the observer.
   setTimeout(() => {
     isMutating = false
     console.log('[widget:dom] Observer re-enabled')
   }, 400)
+
+  return failures
 }
 
 // ---------------------------------------------------------------------------
 // Action router
 // ---------------------------------------------------------------------------
 
+// Returns a failure string if something went wrong, or undefined on success.
 async function _executeAction({ type, selector, value }) {
   const el = document.querySelector(selector)
 
   if (!el) {
     console.warn(`[widget:dom] Element not found: "${selector}"`)
-    return
+    return `Element not found on page: "${selector}"`
   }
 
   switch (type) {
@@ -66,10 +78,39 @@ async function _executeAction({ type, selector, value }) {
 
     case 'focus':
       el.focus()
+      // For inputs that open a suggestion/dropdown panel on focus (search boxes,
+      // comboboxes, autocomplete fields), wait briefly so the dropdown appears
+      // before the next action tries to interact with its contents.
+      if (
+        el.type === 'search' ||
+        el.getAttribute('role') === 'combobox' ||
+        el.getAttribute('aria-autocomplete') ||
+        el.getAttribute('aria-haspopup')
+      ) {
+        await _sleep(200)
+      }
       break
 
     case 'clear':
-      _simulateFill(el, '')
+      // Only fire 'input', not 'change' — a 'change' event on empty value can
+      // close dropdown panels or reset chip-select state on some sites.
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        _nativeSetter(el).call(el, '')
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }))
+      } else {
+        // Non-input element (e.g. a chip container or display div). Try to find
+        // and click a clear/remove button inside it. LLM should use deselect for chips.
+        const clearBtn = el.querySelector(
+          '[aria-label*="clear" i],[aria-label*="remove" i],[aria-label*="delete" i],' +
+          '[title*="clear" i],button,[role="button"]'
+        )
+        if (clearBtn) {
+          clearBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+        } else {
+          console.warn(`[widget:dom] clear: "${selector}" is not an input — use deselect for chip fields`)
+          return `Cannot clear "${selector}" — it is not a text input. Use deselect to remove chip selections.`
+        }
+      }
       break
 
     case 'fill':
@@ -87,12 +128,10 @@ async function _executeAction({ type, selector, value }) {
       break
 
     case 'multi_select':
-      await _executeMultiSelect(el, value ?? '')
-      break
+      return await _executeMultiSelect(el, value ?? '')
 
     case 'deselect':
-      await _executeDeselect(el, value ?? '')
-      break
+      return await _executeDeselect(el, value ?? '')
 
     case 'click':
       el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -122,8 +161,7 @@ async function _executeAction({ type, selector, value }) {
     }
 
     case 'search_select':
-      await _executeSearchSelect(el, value ?? '')
-      break
+      return await _executeSearchSelect(el, value ?? '')
 
     default:
       console.warn(`[widget:dom] Unknown action type: "${type}"`)
@@ -155,7 +193,7 @@ async function _executeMultiSelect(el, value) {
       }
     }
     console.warn(`[widget:dom] multi_select: no native option matches "${value}"`)
-    return
+    return `No option matching "${value}" found in the multi-select field.`
   }
 
   // Custom chip/tag UI — open dropdown then click matching option
@@ -166,7 +204,7 @@ async function _executeMultiSelect(el, value) {
   const option = await _pollForOption(value, 2000)
   if (!option) {
     console.warn(`[widget:dom] multi_select: no dropdown option found for "${value}"`)
-    return
+    return `No dropdown option found for "${value}" in the multi-select field.`
   }
 
   option.scrollIntoView({ block: 'nearest' })
@@ -221,7 +259,7 @@ async function _executeDeselect(el, value) {
   const chip = _findChipByText(searchRoot, lower)
   if (!chip) {
     console.warn(`[widget:dom] deselect: no chip found for "${value}"`)
-    return
+    return `Could not find a selected chip/tag matching "${value}" to remove.`
   }
 
   const removeBtn = _findRemoveButton(chip)
@@ -297,39 +335,89 @@ function _findRemoveButton(chip) {
 /**
  * Type into an autocomplete field and select the best matching option.
  *
+ * Simulates a real human: checks after every keystroke (starting from the 2nd)
+ * whether a high-confidence match has appeared in the dropdown. Stops typing
+ * the moment one does — exactly how a real user would stop at "New Y" when
+ * "New York (JFK)" appears, rather than typing the full string.
+ *
  * Problems this solves:
  *   1. Debounce — types char-by-char so the debounced handler fires naturally.
- *   2. Early results — checks for options after every char (min 2); stops
- *      typing as soon as a match appears instead of always typing the full value.
+ *   2. Early results — stops typing as soon as a match appears; avoids the
+ *      "full string closes the dropdown" problem (e.g. "Nepal" finds nothing
+ *      but "Ne" might show results before the debounce resets).
  *   3. Partial / formatted options — scored matching handles "New York" → "New York (JFK)".
  *   4. Value doesn't exist — falls back to progressively shorter word-prefixes so
  *      the autocomplete can still surface relevant options.
  */
 async function _executeSearchSelect(el, value) {
+  // Focus the declared element. Many flight-booking sites respond to the click
+  // that preceded this action by opening a modal/overlay with its OWN search
+  // input — the active element will have moved there. If we detect this, we
+  // use the newly focused input instead so we type into the right field.
   el.focus()
-  _simulateFill(el, '')
+  await _sleep(120)
+
+  let activeEl = el
+  const maybeFocused = document.activeElement
+  if (
+    maybeFocused && maybeFocused !== el &&
+    (maybeFocused.tagName === 'INPUT' || maybeFocused.tagName === 'TEXTAREA')
+  ) {
+    activeEl = maybeFocused
+    console.log('[widget:dom] search_select: focus followed to', activeEl.tagName, activeEl.type || '')
+  }
+
+  // Clear the field — dispatch only 'input', NOT 'change'.
+  // On many sites a 'change' event on empty value closes the dropdown panel;
+  // 'input' with empty value puts it into "show suggestions" mode instead.
+  _nativeSetter(activeEl).call(activeEl, '')
+  activeEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }))
   await _sleep(80)
 
-  // Snapshot which dropdown containers are already visible BEFORE we type.
-  // After typing, we only trust options from containers that are NEW —
-  // appeared because the site responded to our input, not pre-existing
-  // nav menus, recent-search panels, or other page elements.
+  // Snapshot which dropdown containers are CURRENTLY visible.
+  // We use this snapshot only to detect which NEW containers appeared AFTER
+  // we start typing (for the post-click Escape check). We do NOT filter
+  // candidates in _bestMatchingOption by this set — the airport results may
+  // appear in the same panel that was already open (opened by a prior click),
+  // and we must not filter those out.
   const preExisting = _snapshotVisibleDropdowns()
+  let option = null
 
-  // ── Phase 1: type char-by-char ──────────────────────────────────────────
-  for (const char of value) {
-    if (document.activeElement !== el) el.focus()
-    el.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }))
-    _nativeSetter(el).call(el, el.value + char)
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }))
-    el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }))
-    await _sleep(60)
+  // ── Phase 1: type char-by-char, check for match after every keystroke ──
+  // IMPORTANT: we track the accumulated string ourselves rather than reading
+  // back activeEl.value. On React-controlled inputs the framework may reset
+  // the value between our native-setter call and the next iteration.
+  const chars = Array.from(value)
+  let typed = ''
+  for (let i = 0; i < chars.length; i++) {
+    const char = chars[i]
+    typed += char
+    if (document.activeElement !== activeEl) activeEl.focus()
+    activeEl.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }))
+    _nativeSetter(activeEl).call(activeEl, typed)
+    activeEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }))
+    activeEl.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }))
+    await _sleep(80)
+
+    // After 2+ chars: check if a high-confidence match already appeared.
+    // Score >= 60 means the option contains (or is contained by) our search term.
+    // If found, stop typing now — mimics a real user stopping when they see the result.
+    if (i >= 1) {
+      const earlyMatch = _bestMatchingOption(value, activeEl, 60)
+      if (earlyMatch) {
+        console.log(`[widget:dom] search_select: early match after "${typed}" — stopping`)
+        option = earlyMatch
+        break
+      }
+    }
   }
   // No 'change' here — can close dropdowns on some sites.
 
-  // ── Phase 2: wait for real search results to appear ─────────────────────
-  console.log(`[widget:dom] search_select: typed "${value}", waiting for results...`)
-  let option = await _pollForOption(value, 5000, el, preExisting)
+  // ── Phase 2: if no early match, wait for debounce + network results ──────
+  if (!option) {
+    console.log(`[widget:dom] search_select: typed "${value}", waiting for results...`)
+    option = await _pollForOption(value, 5000, activeEl)
+  }
 
   // ── Phase 3: retry with shorter prefixes ────────────────────────────────
   if (!option) {
@@ -339,35 +427,81 @@ async function _executeSearchSelect(el, value) {
       if (prefix.length < 2) break
 
       console.log(`[widget:dom] search_select: no results — retrying with "${prefix}"`)
-      _simulateFill(el, '')
+      _nativeSetter(activeEl).call(activeEl, '')
+      activeEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }))
       await _sleep(80)
 
-      for (const char of prefix) {
-        if (document.activeElement !== el) el.focus()
-        el.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }))
-        _nativeSetter(el).call(el, el.value + char)
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }))
-        el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }))
-        await _sleep(60)
+      const prefixChars = Array.from(prefix)
+      let prefixTyped = ''
+      for (let i = 0; i < prefixChars.length; i++) {
+        const char = prefixChars[i]
+        prefixTyped += char
+        if (document.activeElement !== activeEl) activeEl.focus()
+        activeEl.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }))
+        _nativeSetter(activeEl).call(activeEl, prefixTyped)
+        activeEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }))
+        activeEl.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }))
+        await _sleep(80)
+
+        if (i >= 1) {
+          const earlyMatch = _bestMatchingOption(value, activeEl, 60)
+          if (earlyMatch) {
+            option = earlyMatch
+            break
+          }
+        }
       }
 
-      option = await _pollForOption(value, 3000, el, preExisting)
+      if (!option) {
+        option = await _pollForOption(value, 3000, activeEl)
+      }
     }
   }
 
   if (!option) {
-    _simulateFill(el, '')
+    _nativeSetter(activeEl).call(activeEl, '')
+    activeEl.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }))
     console.warn(`[widget:dom] search_select: no real result found for "${value}" — field cleared`)
-    return
+    return `No autocomplete result found for "${value}". The field has been cleared. The user may need to try a different name or spelling.`
   }
 
   // ── Click the matched option ─────────────────────────────────────────────
   option.scrollIntoView({ block: 'nearest' })
-  el.focus()
-  option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
-  option.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true, view: window }))
-  option.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true, view: window }))
-  el.dispatchEvent(new Event('change', { bubbles: true }))
+  activeEl.focus()
+
+  // Some multi-select dropdowns render each option as a <li> wrapping a
+  // <input type="checkbox">. Clicking the outer <li> may not fire the
+  // checkbox's change handler. Prefer clicking the checkbox directly so the
+  // site's state management picks it up correctly.
+  const innerCheckbox = option.querySelector('input[type="checkbox"]')
+  const clickTarget = innerCheckbox || option
+
+  clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
+  clickTarget.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true, view: window }))
+  clickTarget.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true, view: window }))
+
+  if (innerCheckbox && !innerCheckbox.checked) {
+    // Force the checked state and fire change in case the click alone wasn't enough
+    innerCheckbox.checked = true
+    innerCheckbox.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  activeEl.dispatchEvent(new Event('change', { bubbles: true }))
+  await _sleep(200)
+
+  // For chip-based multi-select fields (airport pickers etc.) the dropdown
+  // stays open after each selection so the user can add more airports.
+  // Close it with Escape so subsequent actions work cleanly.
+  const dropdownStillOpen = Array.from(
+    document.querySelectorAll('ul, ol, [role="listbox"], [role="menu"]')
+  ).some(c => !preExisting.has(c) && _isVisible(c))
+
+  if (dropdownStillOpen) {
+    activeEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    activeEl.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Escape', bubbles: true }))
+    await _sleep(100)
+    console.log('[widget:dom] search_select: closed dropdown with Escape')
+  }
 
   console.log(`[widget:dom] search_select: selected "${option.textContent?.trim()}"`)
 }
@@ -396,10 +530,10 @@ function _snapshotVisibleDropdowns() {
  * @param {Element|null} inputEl    — input element, for proximity detection
  * @param {Set|null}     preExisting — containers visible before typing; new ones are dropdown results
  */
-async function _pollForOption(searchValue, timeoutMs, inputEl = null, preExisting = null) {
+async function _pollForOption(searchValue, timeoutMs, inputEl = null) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const match = _bestMatchingOption(searchValue, inputEl, preExisting)
+    const match = _bestMatchingOption(searchValue, inputEl)
     if (match) return match
     await _sleep(100)
   }
@@ -449,18 +583,14 @@ async function _pollForOption(searchValue, timeoutMs, inputEl = null, preExistin
  * @param {string}       searchValue
  * @param {Element|null} inputEl     — for proximity detection
  * @param {Set|null}     preExisting — containers visible before typing started
+ * @param {number}       minScore    — minimum score to return a match (default 1; use 60 for early-stop checks)
  */
-function _bestMatchingOption(searchValue, inputEl = null, preExisting = null) {
+function _bestMatchingOption(searchValue, inputEl = null, minScore = 1) {
   const lower = searchValue.toLowerCase().trim()
   const searchWords = lower.split(/\s+/).filter(Boolean)
   const candidates = new Set()
 
   // ── Helpers ──────────────────────────────────────────────────────────────
-
-  /** True if `container` appeared after typing started (not pre-existing). */
-  function isNew(container) {
-    return !preExisting || !preExisting.has(container)
-  }
 
   function isPositionedDropdown(el) {
     const s = window.getComputedStyle(el)
@@ -497,10 +627,12 @@ function _bestMatchingOption(searchValue, inputEl = null, preExisting = null) {
     if (_isVisible(el)) candidates.add(el)
   })
 
-  // ── Strategy 2: new visible positioned containers ─────────────────────────
+  // ── Strategy 2: visible positioned containers ─────────────────────────────
+  // We do NOT filter by preExisting here. Airport results may appear in the
+  // same panel that was already open (e.g. opened by a prior click action).
+  // The score threshold is what distinguishes real results from nav/UI noise.
   document.querySelectorAll('ul, ol, [role="listbox"], [role="menu"]').forEach(container => {
     if (!_isVisible(container) || !isPositionedDropdown(container)) return
-    if (!isNew(container)) return   // skip menus that were already on screen
     addFromContainer(container)
   })
 
@@ -517,13 +649,12 @@ function _bestMatchingOption(searchValue, inputEl = null, preExisting = null) {
       )
     }
 
-    // 3a: walk up ancestors, look for new positioned descendants near the input
+    // 3a: walk up ancestors, look for positioned descendants near the input
     let ancestor = inputEl.parentElement
     for (let i = 0; i < 5 && ancestor && ancestor !== document.body; i++) {
       ancestor.querySelectorAll('div, ul').forEach(container => {
         if (container === inputEl || container.contains(inputEl)) return
         if (!_isVisible(container) || !isPositionedDropdown(container)) return
-        if (!isNew(container)) return
         if (!isNearInput(container.getBoundingClientRect())) return
         addFromContainer(container)
       })
@@ -536,7 +667,6 @@ function _bestMatchingOption(searchValue, inputEl = null, preExisting = null) {
         if (!_isVisible(portal)) return
         const s = window.getComputedStyle(portal)
         if (s.position !== 'absolute' && s.position !== 'fixed') return
-        if (!isNew(portal)) return
         if (!isNearInput(portal.getBoundingClientRect())) return
         addFromContainer(portal)
       })
@@ -568,7 +698,7 @@ function _bestMatchingOption(searchValue, inputEl = null, preExisting = null) {
     if (score > bestScore) { bestScore = score; best = opt }
   }
 
-  return bestScore > 0 ? best : null
+  return bestScore >= minScore ? best : null
 }
 
 // ---------------------------------------------------------------------------
