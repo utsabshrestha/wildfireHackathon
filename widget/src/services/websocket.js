@@ -534,6 +534,7 @@ export class WidgetWebSocket {
     this.manualClose = false
     this._pingTimer = null
     this._sessionId = null
+    this._connectRejected = false  // prevents double-reject on error+close race
   }
 
   /**
@@ -552,9 +553,12 @@ export class WidgetWebSocket {
         return
       }
 
+      this._connectRejected = false
       const timeout = setTimeout(() => {
-        reject(new Error('WebSocket connection timed out after 5s'))
-      }, 5000)
+        if (this._connectRejected) return
+        this._connectRejected = true
+        reject(new Error('WebSocket connection timed out after 10s'))
+      }, 10000)
 
       this.ws.addEventListener('open', () => {
         clearTimeout(timeout)
@@ -566,6 +570,7 @@ export class WidgetWebSocket {
       })
 
       this.ws.addEventListener('message', (event) => {
+        this._resetPing()   // any inbound message resets the idle timer
         let message
         try {
           message = JSON.parse(event.data)
@@ -573,7 +578,9 @@ export class WidgetWebSocket {
           console.error('[widget:ws] Failed to parse message:', event.data)
           return
         }
-        console.log('[widget:ws] Received:', message)
+        if (message.type !== 'pong') {
+          console.log('[widget:ws] Received:', message)
+        }
         this._dispatch(message.type, message)
       })
 
@@ -589,7 +596,10 @@ export class WidgetWebSocket {
 
       this.ws.addEventListener('error', () => {
         clearTimeout(timeout)
-        reject(new Error('WebSocket connection error'))
+        if (!this._connectRejected) {
+          this._connectRejected = true
+          reject(new Error('WebSocket connection error'))
+        }
         this._dispatch('error', {})
       })
     })
@@ -622,6 +632,7 @@ export class WidgetWebSocket {
    * @param {string} sessionId
    */
   sendSpeech(text, sessionId) {
+    if (!sessionId) { console.warn('[widget:ws] sendSpeech called without sessionId'); return }
     this._send({
       type: 'process_speech',
       session_id: sessionId,
@@ -655,6 +666,7 @@ export class WidgetWebSocket {
    * @param {string}   sessionId
    */
   sendActionFeedback(failures, sessionId) {
+    if (!sessionId) { console.warn('[widget:ws] sendActionFeedback called without sessionId'); return }
     const summary = failures.join(' | ')
     console.log('[widget:ws] Sending action feedback:', summary)
     this._send({
@@ -676,6 +688,7 @@ export class WidgetWebSocket {
    * @param {string}   sessionId
    */
   sendGiveUp(failures, sessionId) {
+    if (!sessionId) { console.warn('[widget:ws] sendGiveUp called without sessionId'); return }
     const summary = failures.join(' | ')
     console.warn('[widget:ws] 3 consecutive failures — sending give-up signal:', summary)
     this._send({
@@ -711,6 +724,7 @@ export class WidgetWebSocket {
   _send(obj) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(obj))
+      if (obj.type !== 'ping') this._resetPing()   // any outbound message resets idle timer
     } else {
       console.warn('[widget:ws] Cannot send — not connected:', obj.type)
     }
@@ -724,14 +738,22 @@ export class WidgetWebSocket {
 
   _startPing() {
     this._stopPing()
-    this._pingTimer = setInterval(() => {
+    this._pingTimer = setTimeout(() => {
       this._send({ type: 'ping', session_id: this._sessionId })
-    }, 20000)
+      this._startPing()   // reschedule after sending
+    }, 25000)
+  }
+
+  _resetPing() {
+    // Called on every inbound/outbound message — resets the idle window
+    if (this._pingTimer) {
+      this._startPing()
+    }
   }
 
   _stopPing() {
     if (this._pingTimer) {
-      clearInterval(this._pingTimer)
+      clearTimeout(this._pingTimer)
       this._pingTimer = null
     }
   }
