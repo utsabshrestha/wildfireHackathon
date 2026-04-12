@@ -74,6 +74,114 @@ SEARCH_WEB_TOOL = {
 }
 
 
+GET_TRAVEL_INSIGHTS_TOOL = {
+    "name": "get_travel_insights",
+    "description": (
+        "Search Reddit, travel blogs, and fare-tracking communities for money-saving tips,\n"
+        "hidden tricks, and community advice about a specific flight route.\n"
+        "Use this PROACTIVELY when flight results are visible (even without the user asking)\n"
+        "and when the user implies curiosity about price, value, or alternatives.\n"
+        "Returns community insights that can help the user save money or travel smarter."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "origin": {
+                "type": "string",
+                "description": "Origin city or airport (e.g. 'Kathmandu' or 'KTM')",
+            },
+            "destination": {
+                "type": "string",
+                "description": "Destination city or airport (e.g. 'Dhaka' or 'DAC')",
+            },
+            "context": {
+                "type": "string",
+                "description": (
+                    "What to focus on, e.g. 'cheapest booking time', 'alternative routes', "
+                    "'layover savings', 'is this price normal'. Keep it short."
+                ),
+            },
+        },
+        "required": ["origin", "destination"],
+    },
+}
+
+COMPARE_FLIGHTS_TOOL = {
+    "name": "compare_flights",
+    "description": (
+        "Search multiple flight booking websites to compare prices for a specific route and date.\n"
+        "Use this when the user asks to compare with other sites (Kayak, Skyscanner, Google Flights, Expedia, etc.),\n"
+        "wants to know if there are cheaper options elsewhere, or says 'check other sites'.\n"
+        "Runs targeted web searches across platforms and returns aggregated price data for comparison."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "origin": {
+                "type": "string",
+                "description": "Origin city or airport code (e.g. 'Kathmandu' or 'KTM')",
+            },
+            "destination": {
+                "type": "string",
+                "description": "Destination city or airport code (e.g. 'Dhaka' or 'DAC')",
+            },
+            "date": {
+                "type": "string",
+                "description": "Outbound travel date (e.g. 'April 15 2026' or '2026-04-15')",
+            },
+            "return_date": {
+                "type": "string",
+                "description": "Return date for round trips (optional)",
+            },
+        },
+        "required": ["origin", "destination", "date"],
+    },
+}
+
+
+async def _execute_flight_comparison(
+    origin: str, destination: str, date: str, return_date: str | None = None
+) -> str:
+    """Search multiple flight booking sites and return aggregated results."""
+    trip = f"{origin} to {destination} on {date}"
+    if return_date:
+        trip += f" returning {return_date}"
+
+    # Use queries that surface travel aggregator articles and cached price pages
+    # rather than trying to scrape booking sites directly (those block crawlers).
+    queries = [
+        f"{origin} {destination} flight price {date} USD cheapest",
+        f"{origin} to {destination} cheapest flight {date} airline price comparison",
+        f"Kayak OR Skyscanner {origin} {destination} flight {date} price",
+    ]
+
+    parts = [f"=== Flight comparison: {trip} ===\n"]
+    for query in queries:
+        result = await _execute_web_search(query)
+        parts.append(result)
+
+    return "\n\n---\n\n".join(parts)
+
+
+async def _execute_travel_insights(
+    origin: str, destination: str, context: str = ""
+) -> str:
+    """Search Reddit and travel communities for money-saving tips on a route."""
+    focus = context or "cheapest booking tips money saving"
+    queries = [
+        f"{origin} {destination} flights cheapest tips reddit",
+        f"site:reddit.com {origin} {destination} flight deals save money",
+        f"{origin} to {destination} flight {focus} travel hacks",
+    ]
+
+    parts = [f"=== Travel insights: {origin} → {destination} ===\n"]
+    for query in queries:
+        result = await _execute_web_search(query)
+        parts.append(result)
+
+    return "\n\n---\n\n".join(parts)
+
+
 PAGE_INIT_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
 A user with a disability has just opened this page. Your job is to greet them and describe what's on the page.
 
@@ -87,22 +195,35 @@ Keep the entire response under 60 words. Speak naturally — it will be read alo
 """
 
 UPDATE_CONTEXT_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
-The host page DOM has just changed — new fields may have appeared, old ones may have gone, or the page may have navigated to a new step (e.g. a confirmation screen, a date picker, a passenger details form).
+The host page DOM has just changed. Decide whether a proactive response is needed.
 
-You are given:
-1. The conversation history so far.
-2. The updated page snapshot (fields, buttons, URL, title).
+╔══ WHEN TO STAY SILENT (empty speech + empty actions) ══╗
+  • Search results, flight cards, or price lists appeared    → SILENT
+  • Minor re-renders, same fields, loading spinners          → SILENT
+  • Any change you are not certain is a new booking step     → SILENT
+  • Anything that looks like a results page or a list        → SILENT
+╚═════════════════════════════════════════════════════════╝
 
-Your job is to decide whether this DOM change requires a proactive response:
-- If a new form step or screen appeared that the user needs to know about, describe it briefly and ask how to proceed.
-- If new input fields appeared that are relevant to the user's last request, fill them if you have the information, or ask for what's missing.
-- If nothing meaningful changed (minor re-renders, same fields), return an empty speech string and an empty actions list so the widget stays silent.
+╔══ WHEN TO SPEAK (actions = []) ══╗
+  • A clearly new booking/checkout STEP appeared (e.g. passenger details
+    form, seat selection, payment screen) — describe it briefly (≤ 20 words)
+    and ask the user how to proceed.
+╚══════════════════════════════════╝
 
-Rules:
-- Keep speech under 30 words. It will be read aloud. No markdown, no lists.
-- Never invent selectors not present in the page context.
-- If unsure whether the change is meaningful, stay silent (empty speech, empty actions).
-- If a [SYSTEM] message reports an autocomplete failure, use your world knowledge to suggest the correct city or airport name and include a corrected search_select action to retry immediately.
+╔══ WHEN TO FILL FIELDS (actions allowed) ══╗
+  • New INPUT / SELECT / TEXTAREA fields appeared that are REQUIRED to
+    complete a task the user explicitly asked for AND you have the values.
+    Fill only those fields. Do not click any button afterwards.
+╚═══════════════════════════════════════════╝
+
+ABSOLUTE RULES — never break these:
+  ✗ Never click ANY button, link, or result item (no "View Details",
+    "Select", "Book", "Continue", "Search", or anything else).
+  ✗ Never submit a form or navigate away from the current page.
+  ✗ Never act on search results — only the USER decides which result to pick.
+  ✗ When in doubt, return empty speech and empty actions.
+
+Style: speech ≤ 20 words, plain language, no markdown.
 """
 
 SYSTEM_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
@@ -120,7 +241,19 @@ Your responsibilities:
 - If the intent is unclear, set needs_clarification=true and ask a single focused follow-up question in the speech field.
 - Never invent selectors that aren't in the provided page context.
 - Keep speech responses under 40 words unless explaining a complex situation.
+- NEVER tell the user to check a website manually, open a new tab themselves, type something themselves,
+  or perform any action on their own. You are their hands and voice. If you cannot do something, say
+  "I wasn't able to get live prices from that site, but here's what I found:" and share what you DID
+  find. Always offer a concrete next step you can take for them.
 - If the page context contains "⚠ Page errors", read them carefully. They mean the previous action failed or the page rejected an input. Acknowledge the specific error to the user and suggest a concrete fix (e.g. try a different spelling, pick from the dropdown, check the date format). Do not repeat the same action that just failed.
+- Complete the ENTIRE search form in a single action sequence. If the user says "fly from New York to LA next Monday", fill origin, destination, AND date, then click the search button — all in one response. Do NOT fill one field and ask "what should I fill next?" unless information is genuinely missing from what the user said.
+- After filling all form fields, click the search/submit button if visible. Stop there — do NOT click result cards, "View Details", "Book", "Select", or any post-search button. Wait for the user to tell you what to do with the results.
+- STOP / CANCEL COMMAND: If the user says "stop", "cancel", "pause", or "halt":
+  • Immediately return EMPTY actions (actions = []).
+  • Do NOT call any tool.
+  • Speak: "Okay, stopped. What would you like to do?"
+  • Do not attempt to resume or retry whatever you were doing before.
+  • Keep the session live and wait for the user's next instruction.
 
 Autocomplete recovery — when a [SYSTEM] message says a search_select failed:
 - Use your world knowledge of airports, cities, countries, and landmarks to identify the correct search term.
@@ -134,7 +267,9 @@ Autocomplete recovery — when a [SYSTEM] message says a search_select failed:
 DOM interaction rules — simulate a real human user:
 1. Always scroll to an element before interacting with it if it might be off-screen.
 2. Always focus an element before filling or selecting it.
-3. If a field already has a value, send clear before fill.
+3. If a plain text field already has a value, send clear before fill.
+   IMPORTANT: Never use clear on airport/chip fields — use deselect instead.
+   clear only works on plain <input> and <textarea> elements, not on chip UIs.
 4. After filling a field, send key_press Tab to move focus naturally to the next field. This fires blur (triggering form validation) and focus on the next input — exactly what a real user does.
 5. For buttons and links, use click only — no focus needed first.
 6. For <select> dropdowns, use focus then select (not fill).
@@ -144,10 +279,15 @@ DOM interaction rules — simulate a real human user:
 Handling result items (flight cards, search results):
 - Result items appear in the page context under "Result items" when search results are shown.
 - Each item has an index, its full visible text (price, airline, times, etc.), and a selector.
-- For queries like "find the cheapest", "pick the first option", "select the fastest":
-  parse the text of each result item to find the best match, then return a click action on its selector.
-- Never guess a selector — only use selectors that appear in the provided result items list.
+- When results are present, READ and SUMMARISE the top 2–3 options to the user (price, airline, duration)
+  and ASK which one they want. Do NOT click anything — just describe and wait.
+- Only click a result item when the user EXPLICITLY instructs you to act on a specific result:
+  e.g. "book the cheapest", "select the first one", "view details on that flight".
+  In that case: parse the result text to identify the right item, then click its selector.
+- Never guess a selector — only use selectors from the provided result items list.
 - If no result items are present, tell the user the results haven't loaded yet and ask them to try again.
+- NEVER proactively click "View Details", "Book", "Select", or any result card button without the user
+  explicitly asking. Doing so navigates away from the results page and loses the other options.
 
 Choosing the right action for dropdowns:
 - Native <select> element (single): use focus then select (not fill).
@@ -158,20 +298,61 @@ Choosing the right action for dropdowns:
 - Dynamic autocomplete / combobox (user types to search, options appear below): use search_select.
   search_select types the value, waits for the dropdown list to appear, and clicks the matching option.
   Never use fill on a dynamic autocomplete — it sets the text but doesn't select an option.
+  IMPORTANT: Do NOT send a separate click or focus action before search_select. search_select handles
+  opening and focusing the field internally. An extra click before search_select causes the action to
+  fail because the results panel is already open when the search begins.
 - For multi-select autocompletes (type to add multiple values, e.g. airport chips): use search_select for each value in sequence to add, and deselect to remove an existing chip.
   Example — user says "add Miami as a second origin":
     search_select #origin "Miami"
   Example — user says "remove Sioux Falls":
     deselect #origin "FSD Sioux Falls"
   The selector for deselect is the input field, not the chip — the widget finds the chip automatically by matching the value text.
+- To REPLACE an existing chip selection (user wants a different airport):
+  1. deselect each currently selected value shown in the page context under "selected".
+  2. search_select the new value.
+  Example — field shows selected: ["FSD Sioux Falls"], user wants "New York":
+    deselect #origin "FSD Sioux Falls"
+    search_select #origin "New York"
+  Always deselect ALL existing chips before adding the new one unless the user explicitly says "add another".
+- "Select multiple airports at once" / "Compare prices" button in a dropdown:
+  Some airport fields show a button like "Select multiple airports at once and compare prices".
+  Clicking it expands a checkbox list of nearby airports. To use it:
+    click <selector-of-that-button>           ← opens the checkbox list
+    click <selector-of-checkbox-for-airport>  ← tick each desired airport
+  Use this when the user asks to compare prices across nearby airports.
+  For a normal single-airport search, do NOT click that button — just use search_select directly.
 
 Web search — call search_web BEFORE execute_actions when:
 - You need an airport code or hub city for a country/region you're not certain about.
-- The user asks about pricing trends, best time to book, or cheapest routes.
-- The user wants travel tips, airline comparisons, or advice from travel communities.
 - A search_select just failed and you want to verify the correct search term before retrying.
 After searching, synthesise the key insight into a brief speech (≤ 40 words) then include the
 appropriate execute_actions. Do not search for information that is already visible in the page context.
+
+Flight comparison — call compare_flights when the user's INTENT suggests wanting alternatives or
+better prices, even if they don't use the word "compare". Triggers include:
+- Explicit: "compare", "check other sites", "Kayak", "Skyscanner", "Google Flights", "Expedia"
+- Price concern: "seems expensive", "is this good?", "can I find cheaper?", "too much", "that's a lot"
+- Alternatives: "any better options?", "other flights?", "what else is there?", "look elsewhere"
+- Value check: "is this a good deal?", "what do others pay?", "worth it?", "is that normal?"
+After getting results, summarise the top 2–3 options across sites (airline, price, key differences)
+in ≤ 50 words. Do NOT execute any DOM actions — just speak the comparison and ask what the user prefers.
+If the search results don't contain live prices from a specific site, share what you DID find and offer
+to search for a specific alternative (e.g. "I found prices starting at $X from [source]. Want me to
+search specifically for [airline] or a connecting route that might be cheaper?"). Never say "check
+[site] manually".
+
+Travel insights — call get_travel_insights:
+- PROACTIVELY whenever flight search results appear in the page context (result_items present)
+  AND the user is asking about options or prices — do this automatically, without being asked.
+- Whenever the user implies curiosity about saving money, timing, routes, or value:
+  "any tips?", "save money", "cheaper way?", "better route", "is there a trick?", "advice?"
+- After compare_flights results come back — run insights too to add community perspective.
+After getting insights, weave the most useful finding naturally into your response:
+  "I found something interesting — [insight]. This could save you around $X."
+  "Reddit travelers suggest [tip] for this route, which could save about $X."
+Only surface insights that are genuinely actionable (save money, time, or hassle). Skip generic tips.
+Do NOT execute any DOM actions after get_travel_insights — just share the finding and ask the user
+if they want to act on it.
 
 Example correct sequence for filling two fields then submitting:
   scroll → focus #from → fill #from "New York" → key_press Tab
@@ -281,21 +462,21 @@ class ClaudeClient(BaseLLMClient):
 
         messages = history + [user_message]
 
-        # Agentic loop — LLM may call search_web one or more times before
-        # calling execute_actions. Cap at 5 search iterations to avoid runaway loops.
-        for _iteration in range(5):
+        # Agentic loop — LLM may call search_web / compare_flights one or more
+        # times before calling execute_actions. Cap at 8 iterations.
+        for _iteration in range(8):
             response = await self._client.messages.create(
                 model=settings.claude_model,
                 max_tokens=1024,
                 system=SYSTEM_PROMPT,
-                tools=[SEARCH_WEB_TOOL, self._execute_tool],
+                tools=[SEARCH_WEB_TOOL, COMPARE_FLIGHTS_TOOL, GET_TRAVEL_INSIGHTS_TOOL, self._execute_tool],
                 tool_choice={"type": "auto"},
                 messages=messages,
             )
 
             # Convert response content to plain dicts once, categorised by type.
             text_blocks: list[dict] = []
-            search_dicts: list[dict] = []
+            lookup_dicts: list[dict] = []   # search_web OR compare_flights calls
             execute_block = None
 
             for block in response.content:
@@ -310,31 +491,45 @@ class ClaudeClient(BaseLLMClient):
                     }
                     if block.name == "execute_actions":
                         execute_block = block
-                    elif block.name == "search_web":
-                        search_dicts.append(block_dict)
+                    elif block.name in ("search_web", "compare_flights", "get_travel_insights"):
+                        lookup_dicts.append(block_dict)
                     # Any other tool_use is silently dropped — avoids unmatched IDs.
 
             # LLM chose to act on the page — return immediately
             if execute_block:
                 return AgentResponse.model_validate(execute_block.input)
 
-            # LLM called search_web (possibly multiple times in one response).
-            # Execute ALL searches and pair EVERY tool_use with its tool_result.
-            # This is the critical fix: if we add N tool_use blocks to the
-            # assistant message, we must add N matching tool_results in the
-            # next user message — otherwise Anthropic rejects with 400.
-            if search_dicts:
+            # LLM called one or more lookup tools (search_web / compare_flights / get_travel_insights).
+            # Execute ALL of them and pair EVERY tool_use with its tool_result.
+            # If we add N tool_use blocks to the assistant message we must add N
+            # matching tool_results in the next user message (Anthropic rule).
+            if lookup_dicts:
                 tool_results = []
-                for sb in search_dicts:
-                    result = await _execute_web_search(sb["input"].get("query", ""))
+                for ld in lookup_dicts:
+                    inp = ld["input"]
+                    if ld["name"] == "search_web":
+                        result = await _execute_web_search(inp.get("query", ""))
+                    elif ld["name"] == "compare_flights":
+                        result = await _execute_flight_comparison(
+                            inp.get("origin", ""),
+                            inp.get("destination", ""),
+                            inp.get("date", ""),
+                            inp.get("return_date"),
+                        )
+                    else:  # get_travel_insights
+                        result = await _execute_travel_insights(
+                            inp.get("origin", ""),
+                            inp.get("destination", ""),
+                            inp.get("context", ""),
+                        )
                     tool_results.append({
                         "type": "tool_result",
-                        "tool_use_id": sb["id"],
+                        "tool_use_id": ld["id"],
                         "content": result,
                     })
-                # assistant_content contains ONLY the search blocks we've responded
+                # assistant_content contains ONLY the lookup blocks we've responded
                 # to — no orphaned tool_use IDs.
-                messages.append({"role": "assistant", "content": text_blocks + search_dicts})
+                messages.append({"role": "assistant", "content": text_blocks + lookup_dicts})
                 messages.append({"role": "user", "content": tool_results})
                 continue
 
@@ -421,6 +616,24 @@ _OPENAI_SEARCH_TOOL = {
     },
 }
 
+_OPENAI_COMPARE_FLIGHTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "compare_flights",
+        "description": COMPARE_FLIGHTS_TOOL["description"],
+        "parameters": COMPARE_FLIGHTS_TOOL["input_schema"],
+    },
+}
+
+_OPENAI_GET_TRAVEL_INSIGHTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_travel_insights",
+        "description": GET_TRAVEL_INSIGHTS_TOOL["description"],
+        "parameters": GET_TRAVEL_INSIGHTS_TOOL["input_schema"],
+    },
+}
+
 _OPENAI_EXECUTE_TOOL = {
     "type": "function",
     "function": {
@@ -458,11 +671,11 @@ class OpenAIClient(BaseLLMClient):
             + [user_message]
         )
 
-        # Agentic loop — LLM may call search_web before execute_actions
-        for _iteration in range(5):
+        # Agentic loop — LLM may call search_web / compare_flights before execute_actions
+        for _iteration in range(8):
             response = await self._client.chat.completions.create(
                 model=settings.openai_model,
-                tools=[_OPENAI_SEARCH_TOOL, _OPENAI_EXECUTE_TOOL],
+                tools=[_OPENAI_SEARCH_TOOL, _OPENAI_COMPARE_FLIGHTS_TOOL, _OPENAI_GET_TRAVEL_INSIGHTS_TOOL, _OPENAI_EXECUTE_TOOL],
                 tool_choice="auto",
                 messages=messages,
                 max_tokens=1024,
@@ -471,21 +684,36 @@ class OpenAIClient(BaseLLMClient):
             msg = response.choices[0].message
             tool_calls = msg.tool_calls or []
 
-            execute_call = next((tc for tc in tool_calls if tc.function.name == "execute_actions"), None)
-            search_call  = next((tc for tc in tool_calls if tc.function.name == "search_web"), None)
+            execute_call  = next((tc for tc in tool_calls if tc.function.name == "execute_actions"), None)
+            lookup_calls  = [tc for tc in tool_calls if tc.function.name in ("search_web", "compare_flights", "get_travel_insights")]
 
             if execute_call:
                 return AgentResponse.model_validate_json(execute_call.function.arguments or "{}")
 
-            if search_call:
-                args = json.loads(search_call.function.arguments or "{}")
-                search_results = await _execute_web_search(args.get("query", ""))
+            if lookup_calls:
                 messages.append(msg.model_dump(exclude_unset=True))
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": search_call.id,
-                    "content": search_results,
-                })
+                for lc in lookup_calls:
+                    args = json.loads(lc.function.arguments or "{}")
+                    if lc.function.name == "search_web":
+                        result = await _execute_web_search(args.get("query", ""))
+                    elif lc.function.name == "compare_flights":
+                        result = await _execute_flight_comparison(
+                            args.get("origin", ""),
+                            args.get("destination", ""),
+                            args.get("date", ""),
+                            args.get("return_date"),
+                        )
+                    else:  # get_travel_insights
+                        result = await _execute_travel_insights(
+                            args.get("origin", ""),
+                            args.get("destination", ""),
+                            args.get("context", ""),
+                        )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": lc.id,
+                        "content": result,
+                    })
                 continue
 
             # No tool call — try to parse a JSON response (fallback for JSON-mode models)

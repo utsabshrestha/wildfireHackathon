@@ -11,19 +11,24 @@ import { executeDomActions } from './services/domActions.js'
 /**
  * Root widget component.
  *
- * Exact connection order:
- *   1. User clicks mic (first time)
- *      → POST /api/session           → store session_id
- *      → WS connect                  → no message sent on open
- *      → send page_init              → server sends greeting agent_response
- *      → speak greeting via TTS
- *      → start STT (user can now speak)
+ * Activation: say "access" (wake word) or click the mic button.
+ *
+ * Hands-free loop once a session is live:
+ *   TTS ends → auto-start STT → user speaks → processing → TTS speaks → …
+ *   User can interrupt TTS by speaking — onspeechstart immediately stops it.
+ *   10-second silence timeout silently restarts STT (no error shown).
+ *
+ * Connection order:
+ *   1. Wake word / mic click
+ *      → POST /api/session  → WS connect  → send page_init
+ *      → server speaks greeting via TTS
+ *      → after greeting TTS ends, auto-start STT
  *   2. STT result
- *      → send process_speech (latest page_context)
- *      → server sends agent_response: speak speech, execute actions
- *   3. Ping every 20s (handled inside WidgetWebSocket)
+ *      → send process_speech  → agent_response: TTS + DOM actions
+ *      → after TTS ends, auto-start STT again
+ *   3. Ping every 20s (inside WidgetWebSocket)
  *   4. Widget closed
- *      → stop STT/TTS, DELETE /api/session, close WS
+ *      → cleanup session/WS  → re-arm wake-word listener
  */
 export function Widget({ config }) {
   const [isOpen, setIsOpen] = useState(false)
@@ -37,11 +42,44 @@ export function Widget({ config }) {
   const sessionIdRef = useRef(null)    // set once, lives for the tab session
   const domObserverRef = useRef(null)  // teardown fn returned by observeDomChanges
   const responseTimeoutRef = useRef(null)
-  const pendingFailuresRef = useRef([]) // action failures queued to send after TTS ends
+  const isTTSPlayingRef = useRef(false)    // true while TTS is speaking — filters STT echo
+  const pendingFailuresRef = useRef([])    // action failures queued to send after TTS ends
+  const consecutiveFailuresRef = useRef(0) // how many feedback rounds in a row without user input
+  const isExecutingRef = useRef(false)     // true while an agent_response is being acted on
 
   const addMessage = useCallback((role, text) => {
     setMessages((prev) => [...prev, { role, text, timestamp: Date.now() }])
   }, [])
+
+  // ── Wake-word re-armer ────────────────────────────────────────────────────
+  // Defined here (not inside useEffect) so it's accessible from handleClose.
+  // Uses only refs so it's safe to capture at any render.
+  const restartWakeWord = useCallback(() => {
+    sttRef.current?.startWakeWord('access', async () => {
+      console.log('[widget] Wake word "access" detected')
+      setIsOpen(true)
+      setErrorMessage(null)
+      if (sessionIdRef.current) {
+        // Session already live — just ensure we're listening
+        if (!isExecutingRef.current) sttRef.current?.start()
+        return
+      }
+      setStatus('processing')
+      try {
+        await initialize()   // eslint-disable-line no-use-before-define
+      } catch (err) {
+        console.error('[widget] Wake word init error:', err)
+        sessionIdRef.current = null
+        domObserverRef.current?.()
+        domObserverRef.current = null
+        wsRef.current?.disconnect()
+        wsRef.current = null
+        setStatus('error')
+        setErrorMessage(err.message)
+        restartWakeWord()   // re-arm after failure
+      }
+    })
+  }, []) // stable — all refs
 
   // ── Response timeout ──────────────────────────────────────────────────────
   // Started whenever we send speech and are waiting for a backend reply.
@@ -69,33 +107,85 @@ export function Widget({ config }) {
 
   useEffect(() => {
     ttsRef.current = new TextToSpeech({
-      onStart: () => setStatus('speaking'),
+      onStart: () => {
+        isTTSPlayingRef.current = true
+        setStatus('speaking')
+      },
       onEnd:   () => {
+        isTTSPlayingRef.current = false
+        isExecutingRef.current = false
         // If action failures were queued while TTS was playing, send them to
         // the LLM now so it can acknowledge the error and guide the user.
         const failures = pendingFailuresRef.current
         if (failures.length > 0) {
           pendingFailuresRef.current = []
           setStatus('processing')
-          wsRef.current?.sendActionFeedback(failures, sessionIdRef.current)
+          consecutiveFailuresRef.current += 1
+          if (consecutiveFailuresRef.current >= 3) {
+            consecutiveFailuresRef.current = 0
+            wsRef.current?.sendGiveUp(failures, sessionIdRef.current)
+          } else {
+            wsRef.current?.sendActionFeedback(failures, sessionIdRef.current)
+          }
           _startResponseTimeout()
         } else {
-          setStatus('idle')
+          consecutiveFailuresRef.current = 0
+          // ── Persistent listening: STT's onstart will flip status to 'listening' ──
+          if (sessionIdRef.current) {
+            sttRef.current?.start()   // no-op if already running (continuous mode)
+          } else {
+            setStatus('idle')
+          }
         }
       },
       onError: (err) => {
         console.error('[widget] TTS error:', err)
+        isTTSPlayingRef.current = false
+        isExecutingRef.current = false
         pendingFailuresRef.current = []
-        setStatus('idle')
+        // Auto-restart listening even after a TTS error
+        if (sessionIdRef.current) {
+          sttRef.current?.start()
+        } else {
+          setStatus('idle')
+        }
       },
     })
 
     sttRef.current = new SpeechToText({
       lang: config.lang,
+      // ── Interrupt: stop TTS the moment speech is detected ─────────────────
+      // onspeechstart fires before the full transcript arrives, giving
+      // near-instant interruption of the current agent response.
+      // Clear the TTS flag FIRST so the onResult that follows doesn't look
+      // like echo even though TTS.onEnd hasn't fired yet.
+      onSpeechStart: () => {
+        isTTSPlayingRef.current = false
+        ttsRef.current?.stop()
+      },
       onStateChange: (s) => {
         if (s === 'listening') setStatus('listening')
       },
       onResult: (transcript) => {
+        // Drop results that arrive while TTS is still playing — they're echo.
+        // onspeechstart clears the flag before this fires when the user genuinely speaks.
+        if (isTTSPlayingRef.current) return
+
+        // ── Immediate stop command ────────────────────────────────────────────
+        // "stop", "cancel", "quit", "pause" — halt all in-flight actions NOW,
+        // before the backend even responds, so the loop breaks instantly.
+        const lower = transcript.toLowerCase().trim()
+        const isStopCommand = /\b(stop|cancel|quit|pause|halt)\b/.test(lower)
+        if (isStopCommand) {
+          ttsRef.current?.stop()
+          pendingFailuresRef.current = []
+          consecutiveFailuresRef.current = 0
+          isExecutingRef.current = false
+          _clearResponseTimeout()
+        }
+
+        consecutiveFailuresRef.current = 0  // new user input resets the retry counter
+        isExecutingRef.current = false      // allow the new response to execute
         console.log('[widget] STT result:', transcript)
         addMessage('user', transcript)
         setStatus('processing')
@@ -104,6 +194,12 @@ export function Widget({ config }) {
         _startResponseTimeout()
       },
       onError: (msg) => {
+        // 'no-speech' is a silence timeout, not a real error.
+        // In persistent mode (session active), silently restart listening.
+        if (msg === 'no-speech' && sessionIdRef.current) {
+          setTimeout(() => sttRef.current?.start(), 200)
+          return
+        }
         console.error('[widget] STT error:', msg)
         setStatus('error')
         setErrorMessage(msg)
@@ -111,11 +207,17 @@ export function Widget({ config }) {
       },
     })
 
+    // ── Wake-word listener ─────────────────────────────────────────────────
+    // Starts immediately — user can say "access" to open the widget without
+    // touching the screen.
+    restartWakeWord()
+
     return () => {
       sttRef.current?.stop()
+      sttRef.current?.stopWakeWord()
       ttsRef.current?.stop()
     }
-  }, [config])
+  }, [config, restartWakeWord])
 
   // ── REST helpers ─────────────────────────────────────────────────────────
 
@@ -145,6 +247,15 @@ export function Widget({ config }) {
     ws.on('agent_response', async (msg) => {
       _clearResponseTimeout()
 
+      // Drop this response if we're already executing another one.
+      // update_context replies can arrive while the original action sequence
+      // is still running; executing them concurrently corrupts field state.
+      if (isExecutingRef.current) {
+        console.warn('[widget] Dropping agent_response — actions already in progress')
+        return
+      }
+      isExecutingRef.current = true
+
       let failures = []
       if (Array.isArray(msg.actions) && msg.actions.length > 0) {
         console.log('[widget] Executing DOM actions:', msg.actions)
@@ -162,15 +273,27 @@ export function Widget({ config }) {
         // This way the user hears the current response before the follow-up.
         if (failures.length > 0) {
           pendingFailuresRef.current = failures
+        } else {
+          consecutiveFailuresRef.current = 0  // clean response — reset retry counter
         }
+        // isExecutingRef released in ttsRef.onEnd (or onError) so we continue
+        // to block update_context responses while TTS is playing.
         ttsRef.current?.speak(msg.speech)
       } else {
+        isExecutingRef.current = false
         if (failures.length > 0) {
           // No speech — send feedback immediately without waiting for TTS
           setStatus('processing')
-          wsRef.current?.sendActionFeedback(failures, sessionIdRef.current)
+          consecutiveFailuresRef.current += 1
+          if (consecutiveFailuresRef.current >= 3) {
+            consecutiveFailuresRef.current = 0
+            wsRef.current?.sendGiveUp(failures, sessionIdRef.current)
+          } else {
+            wsRef.current?.sendActionFeedback(failures, sessionIdRef.current)
+          }
           _startResponseTimeout()
         } else {
+          consecutiveFailuresRef.current = 0
           setStatus('idle')
         }
       }
@@ -240,6 +363,10 @@ export function Widget({ config }) {
     // dynamic forms), send update_context so the backend stays in sync.
     domObserverRef.current = observeDomChanges(
       (pageContext) => {
+        // Suppress context updates while actions are executing or TTS is playing.
+        // Sending update_context mid-execution causes the LLM to issue a second
+        // concurrent action sequence that races with the ongoing one.
+        if (isExecutingRef.current) return
         ws.sendUpdateContext(pageContext, sessionId)
       },
       (errors) => {
@@ -257,14 +384,13 @@ export function Widget({ config }) {
   // ── Mic button handler ───────────────────────────────────────────────────
 
   async function handleFabClick() {
-    // Speaking → stop TTS
+    // Speaking → interrupt TTS; onEnd will re-arm STT automatically
     if (status === 'speaking') {
       ttsRef.current?.stop()
-      setStatus('idle')
       return
     }
 
-    // Listening → stop STT
+    // Listening → manual pause (user wants to stop mic)
     if (status === 'listening') {
       sttRef.current?.stop()
       setStatus('idle')
@@ -283,12 +409,11 @@ export function Widget({ config }) {
     setErrorMessage(null)
 
     // First click only: run the full initialization sequence
+    let justInitialized = false
     if (!sessionIdRef.current) {
       try {
         await initialize()
-        // After greeting TTS ends (status goes idle → listening is triggered
-        // by the user clicking again). But we also start STT immediately so
-        // the user can speak right after the greeting.
+        justInitialized = true
       } catch (err) {
         console.error('[widget] Init error:', err)
         sessionIdRef.current = null   // allow retry
@@ -302,8 +427,12 @@ export function Widget({ config }) {
       }
     }
 
-    // Start listening — on subsequent clicks the greeting is already done
-    sttRef.current?.start()
+    // On first init: the greeting TTS will play, and auto-restart in ttsRef.onEnd
+    // will start STT afterwards — no need to start it here.
+    // On subsequent mic clicks: session is live, start listening immediately.
+    if (!justInitialized) {
+      sttRef.current?.start()
+    }
   }
 
   // ── Close / cleanup ──────────────────────────────────────────────────────
@@ -327,6 +456,9 @@ export function Widget({ config }) {
     }
     wsRef.current?.disconnect()
     wsRef.current = null
+
+    // Re-arm the wake-word listener so the user can say "access" to reopen
+    restartWakeWord()
   }
 
   // ── Render ───────────────────────────────────────────────────────────────

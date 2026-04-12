@@ -37,10 +37,14 @@ export function getPageContext() {
       ''
 
     const selector = el.id
-      ? `#${el.id}`
+      ? `#${CSS.escape(el.id)}`
       : el.name
-        ? `[name="${el.name}"]`
-        : el.tagName.toLowerCase()
+        ? `[name="${_escAttr(el.name)}"]`
+        : el.getAttribute('aria-label')
+          ? `[aria-label="${_escAttr(el.getAttribute('aria-label'))}"]`
+          : el.placeholder
+            ? `[placeholder="${_escAttr(el.placeholder)}"]`
+            : el.tagName.toLowerCase()
 
     // Collect <option> values for <select> elements
     let options = undefined
@@ -51,6 +55,14 @@ export function getPageContext() {
       multiple = el.multiple || false
       if (multiple) {
         selected_values = Array.from(el.selectedOptions).map((o) => o.text || o.value).filter(Boolean)
+      }
+    } else {
+      // For custom chip/tag multi-select UIs (e.g. airport chip inputs), detect
+      // any chip elements near this input and report them as selected_values.
+      const chipInfo = _detectChipSelections(el)
+      if (chipInfo.multiple) {
+        multiple = true
+        selected_values = chipInfo.selectedValues
       }
     }
 
@@ -74,14 +86,8 @@ export function getPageContext() {
       const text = el.textContent?.trim() || el.value || el.getAttribute('aria-label') || ''
       if (!text) return
 
-      const selector = el.id
-        ? `#${el.id}`
-        : el.className
-          ? `.${el.className.trim().split(/\s+/)[0]}`
-          : el.tagName.toLowerCase()
-
       buttons.push({
-        selector,
+        selector: _buildSelector(el),
         text,
         aria_label: el.getAttribute('aria-label') || undefined,
         disabled: el.disabled || false,
@@ -140,9 +146,86 @@ export function getPageErrors() {
   return errors
 }
 
+/** Escape a string for use inside a CSS attribute selector value. */
+function _escAttr(val) {
+  return val.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
 function _isVisible(el) {
   const s = window.getComputedStyle(el)
   return s.display !== 'none' && s.visibility !== 'hidden' && !!el.offsetParent
+}
+
+/**
+ * For a text/search input, detect whether it is part of a chip/tag multi-select
+ * UI (e.g. airport chip selectors on flight booking sites).
+ *
+ * Walks up to 5 ancestor levels looking for a container that holds visible
+ * chip elements with a remove button (×). If found, returns the chip texts
+ * as selectedValues so the LLM knows what is already selected.
+ *
+ * Two strategies:
+ *   1. Class-based — chips with well-known CSS class patterns.
+ *   2. Structural — compact sibling elements that contain text + a remove button.
+ *
+ * @param {HTMLElement} inputEl
+ * @returns {{ multiple: boolean, selectedValues: string[] | undefined }}
+ */
+function _detectChipSelections(inputEl) {
+  const CHIP_SELECTORS = [
+    '[class*="chip"]', '[class*="tag"]', '[class*="token"]',
+    '[class*="badge"]', '[class*="pill"]',
+  ].join(',')
+
+  let node = inputEl.parentElement
+  for (let i = 0; i < 5 && node && node !== document.body; i++) {
+    // Strategy 1: elements matching known chip class patterns
+    const byClass = Array.from(node.querySelectorAll(CHIP_SELECTORS)).filter(c => {
+      if (c === inputEl || c.contains(inputEl) || inputEl.contains(c)) return false
+      if (!_isVisible(c)) return false
+      // Must have an internal remove button — plain badges/labels don't count
+      return !!(c.querySelector('button,[role="button"],svg,[aria-label*="remove" i],[aria-label*="delete" i]'))
+    })
+
+    if (byClass.length > 0) {
+      const vals = byClass.map(_extractChipText).filter(Boolean)
+      if (vals.length > 0) return { multiple: true, selectedValues: vals }
+    }
+
+    // Strategy 2: structural — direct children of this ancestor that are
+    // compact visible elements containing text + a remove button, but are
+    // NOT the input itself and NOT large containers.
+    const byStructure = Array.from(node.children).filter(child => {
+      if (child === inputEl || child.contains(inputEl)) return false
+      if (!_isVisible(child)) return false
+      const text = (child.textContent || '').trim()
+      if (!text || text.length > 100) return false
+      return !!(child.querySelector('button,[role="button"],svg'))
+    })
+
+    if (byStructure.length > 0) {
+      const vals = byStructure.map(_extractChipText).filter(Boolean)
+      if (vals.length > 0) return { multiple: true, selectedValues: vals }
+    }
+
+    node = node.parentElement
+  }
+
+  return { multiple: false, selectedValues: undefined }
+}
+
+/**
+ * Extract the visible text label from a chip element, excluding the
+ * remove button / icon text so we get just the value (e.g. "FSD Sioux Falls").
+ */
+function _extractChipText(chip) {
+  const clone = chip.cloneNode(true)
+  clone.querySelectorAll(
+    'button,[role="button"],svg,' +
+    '[aria-label*="remove" i],[aria-label*="delete" i],[aria-label*="close" i],' +
+    '[class*="close"],[class*="remove"],[class*="delete"],[class*="clear"]'
+  ).forEach(el => el.remove())
+  return (clone.textContent || '').trim().replace(/\s+/g, ' ').replace(/[×✕✖]/g, '').trim()
 }
 
 /**
@@ -257,7 +340,9 @@ export function observeDomChanges(onContextChanged, onPageError = null, debounce
   let debounceTimer = null
   let errorDebounceTimer = null
 
-  const WATCHED_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'FORM', 'LABEL'])
+  // BUTTON intentionally excluded — result cards appearing with action buttons
+  // should not trigger update_context. We only care about new form fields.
+  const WATCHED_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'FORM', 'LABEL'])
   const WATCHED_ATTRS = new Set(['id', 'name', 'type', 'disabled', 'required', 'aria-label', 'placeholder'])
 
   function scheduleUpdate() {
@@ -293,7 +378,7 @@ export function observeDomChanges(onContextChanged, onPageError = null, debounce
 
   function hasWatchedDescendant(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return false
-    return node.querySelector?.('input, select, textarea, button') !== null
+    return node.querySelector?.('input, select, textarea') !== null
   }
 
   /** True if this node looks like an alert / toast / error banner. */
@@ -510,6 +595,26 @@ export class WidgetWebSocket {
         + `Use your knowledge of airports, cities, and countries to identify the correct search term. `
         + `For example, if "Nepal" failed, you know the main airport is Tribhuvan International (KTM) in Kathmandu — retry with search_select using "Kathmandu". `
         + `Briefly tell the user what you're trying (e.g. "Nepal's airport is in Kathmandu, trying that") and include the corrected search_select action in your response.`,
+      page_context: getPageContext(),
+    })
+  }
+
+  /**
+   * Called after 3 consecutive failures on the same intent.
+   * Instructs the LLM to stop retrying and ask the user for help instead.
+   *
+   * @param {string[]} failures
+   * @param {string}   sessionId
+   */
+  sendGiveUp(failures, sessionId) {
+    const summary = failures.join(' | ')
+    console.warn('[widget:ws] 3 consecutive failures — sending give-up signal:', summary)
+    this._send({
+      type: 'process_speech',
+      session_id: sessionId,
+      text: `[SYSTEM] After multiple attempts the action still failed: ${summary}. `
+        + `Do NOT try again automatically. Tell the user what went wrong in plain language and ask them to `
+        + `provide a different search term, the exact airport name, or the IATA code (e.g. "JFK", "LHR").`,
       page_context: getPageContext(),
     })
   }
