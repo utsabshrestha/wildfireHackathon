@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'preact/hooks'
 import { FloatingButton } from './components/FloatingButton.jsx'
 import { ChatPanel } from './components/ChatPanel.jsx'
 import { StatusIndicator } from './components/StatusIndicator.jsx'
-import { WidgetWebSocket, observeDomChanges } from './services/websocket.js'
+import { WidgetWebSocket, observeDomChanges, getPageErrors } from './services/websocket.js'
 import { SpeechToText } from './services/stt.js'
 import { TextToSpeech } from './services/tts.js'
 import { executeDomActions } from './services/domActions.js'
@@ -37,6 +37,7 @@ export function Widget({ config }) {
   const sessionIdRef = useRef(null)    // set once, lives for the tab session
   const domObserverRef = useRef(null)  // teardown fn returned by observeDomChanges
   const responseTimeoutRef = useRef(null)
+  const pendingFailuresRef = useRef([]) // action failures queued to send after TTS ends
 
   const addMessage = useCallback((role, text) => {
     setMessages((prev) => [...prev, { role, text, timestamp: Date.now() }])
@@ -69,9 +70,22 @@ export function Widget({ config }) {
   useEffect(() => {
     ttsRef.current = new TextToSpeech({
       onStart: () => setStatus('speaking'),
-      onEnd:   () => setStatus('idle'),
+      onEnd:   () => {
+        // If action failures were queued while TTS was playing, send them to
+        // the LLM now so it can acknowledge the error and guide the user.
+        const failures = pendingFailuresRef.current
+        if (failures.length > 0) {
+          pendingFailuresRef.current = []
+          setStatus('processing')
+          wsRef.current?.sendActionFeedback(failures, sessionIdRef.current)
+          _startResponseTimeout()
+        } else {
+          setStatus('idle')
+        }
+      },
       onError: (err) => {
         console.error('[widget] TTS error:', err)
+        pendingFailuresRef.current = []
         setStatus('idle')
       },
     })
@@ -130,15 +144,35 @@ export function Widget({ config }) {
 
     ws.on('agent_response', async (msg) => {
       _clearResponseTimeout()
+
+      let failures = []
       if (Array.isArray(msg.actions) && msg.actions.length > 0) {
         console.log('[widget] Executing DOM actions:', msg.actions)
-        await executeDomActions(msg.actions)
+        failures = await executeDomActions(msg.actions)
+        // Also capture any page-level validation errors the site showed in
+        // response to our actions (toasts, aria-invalid, etc.)
+        const pageErrs = getPageErrors()
+        if (pageErrs.length > 0) failures = [...failures, ...pageErrs]
+        if (failures.length > 0) console.warn('[widget] Issues after actions:', failures)
       }
+
       if (msg.speech) {
         addMessage('agent', msg.speech)
+        // Queue failures so onEnd can send them after TTS finishes speaking.
+        // This way the user hears the current response before the follow-up.
+        if (failures.length > 0) {
+          pendingFailuresRef.current = failures
+        }
         ttsRef.current?.speak(msg.speech)
       } else {
-        setStatus('idle')
+        if (failures.length > 0) {
+          // No speech — send feedback immediately without waiting for TTS
+          setStatus('processing')
+          wsRef.current?.sendActionFeedback(failures, sessionIdRef.current)
+          _startResponseTimeout()
+        } else {
+          setStatus('idle')
+        }
       }
     })
 
@@ -204,9 +238,20 @@ export function Widget({ config }) {
     // Step 4: start watching the host page for DOM changes.
     // When fields/buttons appear, disappear, or get new IDs (SPA navigation,
     // dynamic forms), send update_context so the backend stays in sync.
-    domObserverRef.current = observeDomChanges((pageContext) => {
-      ws.sendUpdateContext(pageContext, sessionId)
-    })
+    domObserverRef.current = observeDomChanges(
+      (pageContext) => {
+        ws.sendUpdateContext(pageContext, sessionId)
+      },
+      (errors) => {
+        // Organic page error detected (e.g. site shows validation toast after
+        // user interaction). Send feedback to LLM so it can guide the user.
+        if (!wsRef.current || !sessionIdRef.current) return
+        console.log('[widget] Organic page error — sending feedback to LLM')
+        setStatus('processing')
+        wsRef.current.sendActionFeedback(errors, sessionIdRef.current)
+        _startResponseTimeout()
+      }
+    )
   }
 
   // ── Mic button handler ───────────────────────────────────────────────────

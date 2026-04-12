@@ -99,7 +99,45 @@ export function getPageContext() {
     fields,
     buttons,
     result_items: resultItems,
+    page_errors: getPageErrors(),
   }
+}
+
+/**
+ * Scan for visible error states on the host page.
+ * Returns an array of human-readable error strings.
+ *
+ * Exported so Widget.jsx can call it directly after executing DOM actions.
+ */
+export function getPageErrors() {
+  const errors = []
+  const seen = new Set()
+
+  function add(text) {
+    const t = text.trim().slice(0, 150)
+    if (t && !seen.has(t)) { seen.add(t); errors.push(t) }
+  }
+
+  // Input-level validation errors
+  document.querySelectorAll('[aria-invalid="true"], .input-error, [data-invalid]').forEach(el => {
+    if (!_isVisible(el)) return
+    const labelEl = el.id ? document.querySelector(`label[for="${el.id}"]`) : null
+    const name = labelEl?.textContent?.trim() ||
+                 el.getAttribute('aria-label') ||
+                 el.placeholder || el.id || 'a field'
+    add(`Validation error on field: "${name}"`)
+  })
+
+  // Visible alert / live region / toast messages
+  document.querySelectorAll(
+    '[role="alert"], [role="status"], [aria-live="assertive"], [aria-live="polite"], ' +
+    '.toast, .snackbar, .alert, .notification, .error-message'
+  ).forEach(el => {
+    if (!_isVisible(el)) return
+    add(el.textContent || '')
+  })
+
+  return errors
 }
 
 function _isVisible(el) {
@@ -201,44 +239,52 @@ function _buildSelector(el) {
 // ── DOM change observer ───────────────────────────────────────────────────
 
 /**
- * Observe the host page DOM for structural changes (new fields, removed fields,
- * attribute changes on inputs). When a meaningful change is detected, calls
- * the provided callback with a debounced snapshot of the new page context.
+ * Observe the host page DOM for two kinds of changes:
  *
- * We watch for:
- *   - childList mutations on the whole document (elements added/removed)
- *   - attribute mutations on inputs/selects/textareas/buttons
- *     (e.g. `id`, `name`, `disabled`, `required`, `type` changing)
+ *   1. Structural changes (new fields, removed fields, SPA navigation)
+ *      → calls `onContextChanged(pageContext)` (debounced, skipped during isMutating)
  *
- * Input `value` changes are intentionally NOT observed here — those are sent
- * with every `process_speech` as the latest page_context snapshot.
+ *   2. Error-state changes (validation alerts appearing, aria-invalid set)
+ *      → calls `onPageError(errors)` when error indicators appear organically
+ *        (NOT during isMutating, so widget's own actions don't trigger this)
  *
- * @param {(ctx: object) => void} onContextChanged - called with new page context
- * @param {number} debounceMs - quiet period before firing (default 400ms)
- * @returns {() => void} teardown function — call to stop observing
+ * @param {(ctx: object) => void}    onContextChanged - called with new page context
+ * @param {(errors: string[]) => void} [onPageError]  - called when page shows errors
+ * @param {number}                   debounceMs       - quiet period (default 400ms)
+ * @returns {() => void} teardown function
  */
-export function observeDomChanges(onContextChanged, debounceMs = 400) {
+export function observeDomChanges(onContextChanged, onPageError = null, debounceMs = 400) {
   let debounceTimer = null
+  let errorDebounceTimer = null
 
-  // The set of tag names / attributes we care about — prevents firing on
-  // every mouseover, style tweak, or animation frame update.
   const WATCHED_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON', 'FORM', 'LABEL'])
   const WATCHED_ATTRS = new Set(['id', 'name', 'type', 'disabled', 'required', 'aria-label', 'placeholder'])
 
   function scheduleUpdate() {
-    // Skip mutations caused by our own DOM actions to avoid the feedback loop:
-    // executeDomActions fills fields → MutationObserver fires → update_context → LLM fills again → loop
     if (isMutating) {
       console.log('[widget:dom-observer] Skipping mutation — widget is executing DOM actions')
       return
     }
     clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
-      // Double-check the flag hasn't been set during the debounce window
       if (isMutating) return
       console.log('[widget:dom-observer] Organic DOM change — sending update_context')
       onContextChanged(getPageContext())
     }, debounceMs)
+  }
+
+  function scheduleErrorCheck() {
+    // Only fire for organic errors — never while widget is filling fields
+    if (isMutating || !onPageError) return
+    clearTimeout(errorDebounceTimer)
+    errorDebounceTimer = setTimeout(() => {
+      if (isMutating) return
+      const errors = getPageErrors()
+      if (errors.length > 0) {
+        console.log('[widget:dom-observer] Page errors detected:', errors)
+        onPageError(errors)
+      }
+    }, 300)
   }
 
   function isWatchedNode(node) {
@@ -247,46 +293,76 @@ export function observeDomChanges(onContextChanged, debounceMs = 400) {
 
   function hasWatchedDescendant(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return false
-    // Quick check before doing a querySelector (which is more expensive)
     return node.querySelector?.('input, select, textarea, button') !== null
+  }
+
+  /** True if this node looks like an alert / toast / error banner. */
+  function isErrorNode(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return false
+    const role = node.getAttribute?.('role') || ''
+    const ariaLive = node.getAttribute?.('aria-live') || ''
+    return role === 'alert' || role === 'status' || ariaLive === 'assertive' || ariaLive === 'polite'
   }
 
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      // Structural changes: nodes added or removed
       if (mutation.type === 'childList') {
-        const relevant =
-          Array.from(mutation.addedNodes).some((n) => isWatchedNode(n) || hasWatchedDescendant(n)) ||
-          Array.from(mutation.removedNodes).some((n) => isWatchedNode(n) || hasWatchedDescendant(n))
+        const addedNodes = Array.from(mutation.addedNodes)
+        const removedNodes = Array.from(mutation.removedNodes)
 
-        if (relevant) {
-          scheduleUpdate()
-          return // one update per batch is enough
+        // Check for structural form changes
+        const structuralChange =
+          addedNodes.some((n) => isWatchedNode(n) || hasWatchedDescendant(n)) ||
+          removedNodes.some((n) => isWatchedNode(n) || hasWatchedDescendant(n))
+        if (structuralChange) { scheduleUpdate(); continue }
+
+        // Check for alert/toast nodes being injected
+        if (addedNodes.some(isErrorNode)) {
+          scheduleErrorCheck()
+          continue
         }
       }
 
-      // Attribute changes on existing elements
       if (mutation.type === 'attributes') {
-        if (isWatchedNode(mutation.target) && WATCHED_ATTRS.has(mutation.attributeName)) {
+        const target = mutation.target
+        const attr = mutation.attributeName
+
+        // aria-invalid being set to "true" on any element
+        if (attr === 'aria-invalid' && target.getAttribute('aria-invalid') === 'true') {
+          scheduleErrorCheck()
+          continue
+        }
+
+        // class change that adds an error-like class
+        if (attr === 'class') {
+          const cls = target.className || ''
+          if (/error|invalid|shake/.test(cls)) {
+            scheduleErrorCheck()
+            continue
+          }
+        }
+
+        // Structural attribute changes on form elements
+        if (isWatchedNode(target) && WATCHED_ATTRS.has(attr)) {
           scheduleUpdate()
-          return
         }
       }
     }
   })
 
   observer.observe(document.body, {
-    childList: true,     // direct children added/removed
-    subtree: true,       // whole document tree
-    attributes: true,   // attribute changes
-    attributeFilter: Array.from(WATCHED_ATTRS),
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: [...Array.from(WATCHED_ATTRS), 'aria-invalid', 'class'],
   })
 
-  console.log('[widget:dom-observer] Observing DOM for context changes')
+  console.log('[widget:dom-observer] Observing DOM for context changes and errors')
 
   return () => {
     observer.disconnect()
     clearTimeout(debounceTimer)
+    clearTimeout(errorDebounceTimer)
     console.log('[widget:dom-observer] Observer disconnected')
   }
 }
@@ -411,6 +487,30 @@ export class WidgetWebSocket {
       type: 'update_context',
       session_id: sessionId,
       page_context: pageContext,
+    })
+  }
+
+  /**
+   * Send action failures + current page state back to the LLM.
+   *
+   * The LLM is asked to use its world knowledge (airports, cities, countries)
+   * to suggest a better search term and immediately retry with search_select
+   * rather than just reporting the error.
+   *
+   * @param {string[]} failures - failure strings from executeDomActions
+   * @param {string}   sessionId
+   */
+  sendActionFeedback(failures, sessionId) {
+    const summary = failures.join(' | ')
+    console.log('[widget:ws] Sending action feedback:', summary)
+    this._send({
+      type: 'process_speech',
+      session_id: sessionId,
+      text: `[SYSTEM] Action failed: ${summary}. `
+        + `Use your knowledge of airports, cities, and countries to identify the correct search term. `
+        + `For example, if "Nepal" failed, you know the main airport is Tribhuvan International (KTM) in Kathmandu — retry with search_select using "Kathmandu". `
+        + `Briefly tell the user what you're trying (e.g. "Nepal's airport is in Kathmandu, trying that") and include the corrected search_select action in your response.`,
+      page_context: getPageContext(),
     })
   }
 

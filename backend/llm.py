@@ -7,6 +7,7 @@ Switch via LLM_PROVIDER env var:
                 JSON mode + Pydantic validation
 """
 
+import asyncio
 import json
 from abc import ABC, abstractmethod
 
@@ -14,11 +15,64 @@ import anthropic
 from openai import AsyncOpenAI
 
 from config import settings
-from models import AgentResponse, PageContext, FormField, PageButton
+from models import AgentResponse, PageContext
 
 # ---------------------------------------------------------------------------
-# Shared prompt
+# Web search helper
 # ---------------------------------------------------------------------------
+
+async def _execute_web_search(query: str) -> str:
+    """Run a DuckDuckGo text search and return the top results as a plain string."""
+    try:
+        from duckduckgo_search import DDGS  # imported lazily so the app works without it
+
+        def _sync_search():
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=5))
+
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(None, _sync_search)
+
+        if not results:
+            return f"No results found for: {query}"
+
+        lines = [f"Search results for: {query}\n"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. {r.get('title', '')}")
+            lines.append(f"   {r.get('body', '')}")
+            lines.append(f"   {r.get('href', '')}")
+            lines.append("")
+        return "\n".join(lines)
+
+    except ImportError:
+        return "Web search unavailable (duckduckgo-search not installed)."
+    except Exception as exc:
+        return f"Search failed: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Tool schemas
+# ---------------------------------------------------------------------------
+
+SEARCH_WEB_TOOL = {
+    "name": "search_web",
+    "description": (
+        "Search the web for up-to-date information. Use this for:\n"
+        "- Airport codes or hub cities for countries/regions you're unsure about\n"
+        "- Flight pricing trends, cheapest booking windows, seasonal deals\n"
+        "- Travel tips, airline reviews, Reddit discussions about a route\n"
+        "- Any factual travel question you can't answer reliably from memory\n"
+        "Keep queries short and specific (e.g. 'Nepal main international airport code')."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query (concise, under 15 words)"}
+        },
+        "required": ["query"],
+    },
+}
+
 
 PAGE_INIT_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
 A user with a disability has just opened this page. Your job is to greet them and describe what's on the page.
@@ -48,6 +102,7 @@ Rules:
 - Keep speech under 30 words. It will be read aloud. No markdown, no lists.
 - Never invent selectors not present in the page context.
 - If unsure whether the change is meaningful, stay silent (empty speech, empty actions).
+- If a [SYSTEM] message reports an autocomplete failure, use your world knowledge to suggest the correct city or airport name and include a corrected search_select action to retry immediately.
 """
 
 SYSTEM_PROMPT = """You are an ADA accessibility assistant embedded in a website via an iframe.
@@ -65,6 +120,16 @@ Your responsibilities:
 - If the intent is unclear, set needs_clarification=true and ask a single focused follow-up question in the speech field.
 - Never invent selectors that aren't in the provided page context.
 - Keep speech responses under 40 words unless explaining a complex situation.
+- If the page context contains "⚠ Page errors", read them carefully. They mean the previous action failed or the page rejected an input. Acknowledge the specific error to the user and suggest a concrete fix (e.g. try a different spelling, pick from the dropdown, check the date format). Do not repeat the same action that just failed.
+
+Autocomplete recovery — when a [SYSTEM] message says a search_select failed:
+- Use your world knowledge of airports, cities, countries, and landmarks to identify the correct search term.
+- Examples: "Nepal" → main airport is Tribhuvan International (KTM) in Kathmandu, try "Kathmandu".
+  "London" → try "London Heathrow" or just "Heathrow". "Dubai" → try "Dubai" (DXB).
+  "New York" → try "New York" (will surface JFK, LGA, EWR). Country names → use the capital city or main hub.
+- Tell the user briefly what you know: "Nepal's main airport is in Kathmandu, let me try that."
+- Then include a corrected search_select action in your response so the retry happens immediately.
+- If you are genuinely unsure of the airport/city, ask the user for the specific city or airport code.
 
 DOM interaction rules — simulate a real human user:
 1. Always scroll to an element before interacting with it if it might be off-screen.
@@ -99,6 +164,14 @@ Choosing the right action for dropdowns:
   Example — user says "remove Sioux Falls":
     deselect #origin "FSD Sioux Falls"
   The selector for deselect is the input field, not the chip — the widget finds the chip automatically by matching the value text.
+
+Web search — call search_web BEFORE execute_actions when:
+- You need an airport code or hub city for a country/region you're not certain about.
+- The user asks about pricing trends, best time to book, or cheapest routes.
+- The user wants travel tips, airline comparisons, or advice from travel communities.
+- A search_select just failed and you want to verify the correct search term before retrying.
+After searching, synthesise the key insight into a brief speech (≤ 40 words) then include the
+appropriate execute_actions. Do not search for information that is already visible in the page context.
 
 Example correct sequence for filling two fields then submitting:
   scroll → focus #from → fill #from "New York" → key_press Tab
@@ -136,6 +209,11 @@ def _build_page_context_str(ctx: PageContext) -> str:
         lines.append(f"\nResult items ({len(ctx.result_items)} visible):")
         for item in ctx.result_items:
             lines.append(f"  [{item.index}] {item.text} → selector={item.selector}")
+
+    if ctx.page_errors:
+        lines.append("\n⚠ Page errors / validation messages:")
+        for err in ctx.page_errors:
+            lines.append(f"  - {err}")
 
     return "\n".join(lines)
 
@@ -179,12 +257,13 @@ class BaseLLMClient(ABC):
 class ClaudeClient(BaseLLMClient):
     def __init__(self) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=settings.claude_api_key)
-        # Build tool schema once from Pydantic model
-        self._tool = {
+        self._execute_tool = {
             "name": "execute_actions",
             "description": "Execute DOM actions on the page and provide a speech response to the user.",
             "input_schema": AgentResponse.model_json_schema(),
         }
+        # Keep old name for callers that reference self._tool (page_description, update_context)
+        self._tool = self._execute_tool
 
     async def get_agent_response(
         self,
@@ -200,15 +279,77 @@ class ClaudeClient(BaseLLMClient):
             ),
         }
 
+        messages = history + [user_message]
+
+        # Agentic loop — LLM may call search_web one or more times before
+        # calling execute_actions. Cap at 5 search iterations to avoid runaway loops.
+        for _iteration in range(5):
+            response = await self._client.messages.create(
+                model=settings.claude_model,
+                max_tokens=1024,
+                system=SYSTEM_PROMPT,
+                tools=[SEARCH_WEB_TOOL, self._execute_tool],
+                tool_choice={"type": "auto"},
+                messages=messages,
+            )
+
+            # Convert response content to plain dicts once, categorised by type.
+            text_blocks: list[dict] = []
+            search_dicts: list[dict] = []
+            execute_block = None
+
+            for block in response.content:
+                if block.type == "text":
+                    text_blocks.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    block_dict = {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                    if block.name == "execute_actions":
+                        execute_block = block
+                    elif block.name == "search_web":
+                        search_dicts.append(block_dict)
+                    # Any other tool_use is silently dropped — avoids unmatched IDs.
+
+            # LLM chose to act on the page — return immediately
+            if execute_block:
+                return AgentResponse.model_validate(execute_block.input)
+
+            # LLM called search_web (possibly multiple times in one response).
+            # Execute ALL searches and pair EVERY tool_use with its tool_result.
+            # This is the critical fix: if we add N tool_use blocks to the
+            # assistant message, we must add N matching tool_results in the
+            # next user message — otherwise Anthropic rejects with 400.
+            if search_dicts:
+                tool_results = []
+                for sb in search_dicts:
+                    result = await _execute_web_search(sb["input"].get("query", ""))
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": sb["id"],
+                        "content": result,
+                    })
+                # assistant_content contains ONLY the search blocks we've responded
+                # to — no orphaned tool_use IDs.
+                messages.append({"role": "assistant", "content": text_blocks + search_dicts})
+                messages.append({"role": "user", "content": tool_results})
+                continue
+
+            # LLM responded with text only — fall through to forced call below
+            break
+
+        # Fallback: force execute_actions so we always return a structured response
         response = await self._client.messages.create(
             model=settings.claude_model,
             max_tokens=1024,
             system=SYSTEM_PROMPT,
-            tools=[self._tool],
+            tools=[self._execute_tool],
             tool_choice={"type": "tool", "name": "execute_actions"},
-            messages=history + [user_message],
+            messages=messages,
         )
-
         for block in response.content:
             if block.type == "tool_use":
                 return AgentResponse.model_validate(block.input)
@@ -271,6 +412,25 @@ _OPENAI_SYSTEM_PROMPT = (
 )
 
 
+_OPENAI_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_web",
+        "description": SEARCH_WEB_TOOL["description"],
+        "parameters": SEARCH_WEB_TOOL["input_schema"],
+    },
+}
+
+_OPENAI_EXECUTE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "execute_actions",
+        "description": "Execute DOM actions on the page and provide a speech response to the user.",
+        "parameters": _OPENAI_SCHEMA_HINT,
+    },
+}
+
+
 class OpenAIClient(BaseLLMClient):
     def __init__(self) -> None:
         self._client = AsyncOpenAI(
@@ -298,13 +458,50 @@ class OpenAIClient(BaseLLMClient):
             + [user_message]
         )
 
+        # Agentic loop — LLM may call search_web before execute_actions
+        for _iteration in range(5):
+            response = await self._client.chat.completions.create(
+                model=settings.openai_model,
+                tools=[_OPENAI_SEARCH_TOOL, _OPENAI_EXECUTE_TOOL],
+                tool_choice="auto",
+                messages=messages,
+                max_tokens=1024,
+            )
+
+            msg = response.choices[0].message
+            tool_calls = msg.tool_calls or []
+
+            execute_call = next((tc for tc in tool_calls if tc.function.name == "execute_actions"), None)
+            search_call  = next((tc for tc in tool_calls if tc.function.name == "search_web"), None)
+
+            if execute_call:
+                return AgentResponse.model_validate_json(execute_call.function.arguments or "{}")
+
+            if search_call:
+                args = json.loads(search_call.function.arguments or "{}")
+                search_results = await _execute_web_search(args.get("query", ""))
+                messages.append(msg.model_dump(exclude_unset=True))
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": search_call.id,
+                    "content": search_results,
+                })
+                continue
+
+            # No tool call — try to parse a JSON response (fallback for JSON-mode models)
+            raw = msg.content or "{}"
+            try:
+                return AgentResponse.model_validate_json(raw)
+            except Exception:
+                break
+
+        # Fallback: force JSON response without tool calls
         response = await self._client.chat.completions.create(
             model=settings.openai_model,
             response_format={"type": "json_object"},
             messages=messages,
             max_tokens=1024,
         )
-
         raw = response.choices[0].message.content or "{}"
         return AgentResponse.model_validate_json(raw)
 

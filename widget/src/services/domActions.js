@@ -24,38 +24,50 @@ export let isMutating = false
  *
  * @param {Array<{type: string, selector: string, value?: string}>} actions
  */
+/**
+ * Execute a batch of DOM actions.
+ * Returns an array of failure strings — one per action that could not complete.
+ * An empty array means everything succeeded.
+ *
+ * @param {Array} actions
+ * @returns {Promise<string[]>} failures
+ */
 export async function executeDomActions(actions) {
-  if (!Array.isArray(actions) || actions.length === 0) return
+  if (!Array.isArray(actions) || actions.length === 0) return []
 
   isMutating = true
   console.log('[widget:dom] Executing', actions.length, 'action(s) — observer suppressed')
 
+  const failures = []
   for (const action of actions) {
     try {
-      await _executeAction(action)
+      const failure = await _executeAction(action)
+      if (failure) failures.push(failure)
     } catch (err) {
-      console.error('[widget:dom] Action failed:', action, err)
+      console.error('[widget:dom] Action threw:', action, err)
+      failures.push(`${action.type} on "${action.selector}" threw: ${err.message}`)
     }
   }
 
-  // Keep the flag set for a short buffer so React/Vue re-renders triggered
-  // by our events are also suppressed before we re-enable the observer.
   setTimeout(() => {
     isMutating = false
     console.log('[widget:dom] Observer re-enabled')
   }, 400)
+
+  return failures
 }
 
 // ---------------------------------------------------------------------------
 // Action router
 // ---------------------------------------------------------------------------
 
+// Returns a failure string if something went wrong, or undefined on success.
 async function _executeAction({ type, selector, value }) {
   const el = document.querySelector(selector)
 
   if (!el) {
     console.warn(`[widget:dom] Element not found: "${selector}"`)
-    return
+    return `Element not found on page: "${selector}"`
   }
 
   switch (type) {
@@ -87,12 +99,10 @@ async function _executeAction({ type, selector, value }) {
       break
 
     case 'multi_select':
-      await _executeMultiSelect(el, value ?? '')
-      break
+      return await _executeMultiSelect(el, value ?? '')
 
     case 'deselect':
-      await _executeDeselect(el, value ?? '')
-      break
+      return await _executeDeselect(el, value ?? '')
 
     case 'click':
       el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -122,8 +132,7 @@ async function _executeAction({ type, selector, value }) {
     }
 
     case 'search_select':
-      await _executeSearchSelect(el, value ?? '')
-      break
+      return await _executeSearchSelect(el, value ?? '')
 
     default:
       console.warn(`[widget:dom] Unknown action type: "${type}"`)
@@ -155,7 +164,7 @@ async function _executeMultiSelect(el, value) {
       }
     }
     console.warn(`[widget:dom] multi_select: no native option matches "${value}"`)
-    return
+    return `No option matching "${value}" found in the multi-select field.`
   }
 
   // Custom chip/tag UI — open dropdown then click matching option
@@ -166,7 +175,7 @@ async function _executeMultiSelect(el, value) {
   const option = await _pollForOption(value, 2000)
   if (!option) {
     console.warn(`[widget:dom] multi_select: no dropdown option found for "${value}"`)
-    return
+    return `No dropdown option found for "${value}" in the multi-select field.`
   }
 
   option.scrollIntoView({ block: 'nearest' })
@@ -221,7 +230,7 @@ async function _executeDeselect(el, value) {
   const chip = _findChipByText(searchRoot, lower)
   if (!chip) {
     console.warn(`[widget:dom] deselect: no chip found for "${value}"`)
-    return
+    return `Could not find a selected chip/tag matching "${value}" to remove.`
   }
 
   const removeBtn = _findRemoveButton(chip)
@@ -297,10 +306,16 @@ function _findRemoveButton(chip) {
 /**
  * Type into an autocomplete field and select the best matching option.
  *
+ * Simulates a real human: checks after every keystroke (starting from the 2nd)
+ * whether a high-confidence match has appeared in the dropdown. Stops typing
+ * the moment one does — exactly how a real user would stop at "New Y" when
+ * "New York (JFK)" appears, rather than typing the full string.
+ *
  * Problems this solves:
  *   1. Debounce — types char-by-char so the debounced handler fires naturally.
- *   2. Early results — checks for options after every char (min 2); stops
- *      typing as soon as a match appears instead of always typing the full value.
+ *   2. Early results — stops typing as soon as a match appears; avoids the
+ *      "full string closes the dropdown" problem (e.g. "Nepal" finds nothing
+ *      but "Ne" might show results before the debounce resets).
  *   3. Partial / formatted options — scored matching handles "New York" → "New York (JFK)".
  *   4. Value doesn't exist — falls back to progressively shorter word-prefixes so
  *      the autocomplete can still surface relevant options.
@@ -315,21 +330,38 @@ async function _executeSearchSelect(el, value) {
   // appeared because the site responded to our input, not pre-existing
   // nav menus, recent-search panels, or other page elements.
   const preExisting = _snapshotVisibleDropdowns()
+  let option = null
 
-  // ── Phase 1: type char-by-char ──────────────────────────────────────────
-  for (const char of value) {
+  // ── Phase 1: type char-by-char, check for match after every keystroke ──
+  const chars = Array.from(value)
+  for (let i = 0; i < chars.length; i++) {
+    const char = chars[i]
     if (document.activeElement !== el) el.focus()
     el.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }))
     _nativeSetter(el).call(el, el.value + char)
     el.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }))
     el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }))
-    await _sleep(60)
+    await _sleep(80)  // slightly longer than raw typing to allow debounce to fire
+
+    // After 2+ chars: check if a high-confidence match already appeared.
+    // Score >= 60 means the option contains (or is contained by) our search term.
+    // If found, stop typing now — mimics a real user stopping when they see the result.
+    if (i >= 1) {
+      const earlyMatch = _bestMatchingOption(value, el, preExisting, 60)
+      if (earlyMatch) {
+        console.log(`[widget:dom] search_select: early match after "${el.value}" — stopping`)
+        option = earlyMatch
+        break
+      }
+    }
   }
   // No 'change' here — can close dropdowns on some sites.
 
-  // ── Phase 2: wait for real search results to appear ─────────────────────
-  console.log(`[widget:dom] search_select: typed "${value}", waiting for results...`)
-  let option = await _pollForOption(value, 5000, el, preExisting)
+  // ── Phase 2: if no early match, wait for debounce + network results ──────
+  if (!option) {
+    console.log(`[widget:dom] search_select: typed "${value}", waiting for results...`)
+    option = await _pollForOption(value, 5000, el, preExisting)
+  }
 
   // ── Phase 3: retry with shorter prefixes ────────────────────────────────
   if (!option) {
@@ -342,23 +374,35 @@ async function _executeSearchSelect(el, value) {
       _simulateFill(el, '')
       await _sleep(80)
 
-      for (const char of prefix) {
+      const prefixChars = Array.from(prefix)
+      for (let i = 0; i < prefixChars.length; i++) {
+        const char = prefixChars[i]
         if (document.activeElement !== el) el.focus()
         el.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }))
         _nativeSetter(el).call(el, el.value + char)
         el.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }))
         el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }))
-        await _sleep(60)
+        await _sleep(80)
+
+        if (i >= 1) {
+          const earlyMatch = _bestMatchingOption(value, el, preExisting, 60)
+          if (earlyMatch) {
+            option = earlyMatch
+            break
+          }
+        }
       }
 
-      option = await _pollForOption(value, 3000, el, preExisting)
+      if (!option) {
+        option = await _pollForOption(value, 3000, el, preExisting)
+      }
     }
   }
 
   if (!option) {
     _simulateFill(el, '')
     console.warn(`[widget:dom] search_select: no real result found for "${value}" — field cleared`)
-    return
+    return `No autocomplete result found for "${value}". The field has been cleared. The user may need to try a different name or spelling.`
   }
 
   // ── Click the matched option ─────────────────────────────────────────────
@@ -449,8 +493,9 @@ async function _pollForOption(searchValue, timeoutMs, inputEl = null, preExistin
  * @param {string}       searchValue
  * @param {Element|null} inputEl     — for proximity detection
  * @param {Set|null}     preExisting — containers visible before typing started
+ * @param {number}       minScore    — minimum score to return a match (default 1; use 60 for early-stop checks)
  */
-function _bestMatchingOption(searchValue, inputEl = null, preExisting = null) {
+function _bestMatchingOption(searchValue, inputEl = null, preExisting = null, minScore = 1) {
   const lower = searchValue.toLowerCase().trim()
   const searchWords = lower.split(/\s+/).filter(Boolean)
   const candidates = new Set()
@@ -568,7 +613,7 @@ function _bestMatchingOption(searchValue, inputEl = null, preExisting = null) {
     if (score > bestScore) { bestScore = score; best = opt }
   }
 
-  return bestScore > 0 ? best : null
+  return bestScore >= minScore ? best : null
 }
 
 // ---------------------------------------------------------------------------

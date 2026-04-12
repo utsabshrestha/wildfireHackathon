@@ -91,6 +91,10 @@ class PageContext(BaseModel):
         default_factory=list,
         description="Visible result cards / list rows (flight results, search results, etc.) — used for queries like 'find the cheapest'"
     )
+    page_errors: list[str] = Field(
+        default_factory=list,
+        description="Visible validation errors or alert messages on the page (e.g. 'Please select a valid airport')"
+    )
 
 
 # ---------------------------------------------------------------------------
